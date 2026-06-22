@@ -52,17 +52,26 @@ request ──► [sentinel] ─► score = w1·crowdsec(ip)        (Phase 3, ou
 - **Bounded tarpit** — global concurrent-connection cap, tiny timers, fixed
   buffers, hard max lifetime. Never a self-DoS.
 - **Self-contained** — every signal computed in-module; no runtime sibling-module
-  dependency. Logic ported from `ssl-fingerprint` (JA4), `error-abuse`
-  (error-rate), `bot-verifier`/`user-agent` (bot/UA) into sentinel's own source.
-- Zero new SSL patch: JA4 uses the same patch-free ClientHello SSL callback
-  `ssl-fingerprint` proves out; JA4H is pure-HTTP.
+  dependency. Logic ported from `error-abuse` (error-rate), `bot-verifier` /
+  `user-agent` (bot/UA), JA4H (in-module) into sentinel's own source.
+- **Zero core patch in Phase 1–3** — JA4H + error-rate + UA/bot + CrowdSec all
+  pure-HTTP / out-of-band. JA4 (TLS) needs a core nginx ClientHello patch, so it
+  is deferred to Phase 4 (added only when JA4H evasion shows in traffic).
 
 ## See also
 
 - Sibling own-modules: `nginx-autocert-module`, `nginx-error-abuse-module`
-  (tarpit prior-art + CI harness template), `nginx-strip-filter-module`,
-  `nginx-cache-turbo-module`, `nginx-label-autoconf-module`.
+  (error-rate + CI-harness source — **sentinel absorbs its logic; standalone
+  deprecated later**), `nginx-strip-filter-module`, `nginx-cache-turbo-module`,
+  `nginx-label-autoconf-module`.
 - Ships in the deb.myguard.nl nginx/angie build (`/opt/packages`).
+
+## Development
+
+- Work on `dev`; feature branches `feat/<phase>` → PR to **`dev`** (local CI only,
+  no remote CI). `master` PRs are unsquashed + remote-CI, opened on request only.
+- Build/test standalone: `bash tools/ci-build.sh`. valgrind + fuzz run manually +
+  monthly (remote workflow) and weekly (local cron).
 
 ## License
 
