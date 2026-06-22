@@ -1,8 +1,10 @@
 # TODO — ngx_http_sentinel_module
 
-Phased build plan. Each phase = own PR + CI-green + merge before next. Tier tag
-`[haiku|sonnet|opus-low|opus|codex]` = cheapest model that does the step. Design
-+ safety rules: [DESIGN.md](DESIGN.md).
+Phased build plan. Each phase = own feat branch off `dev` → PR to **`dev`** →
+**local CI green** → merge. NO remote CI on dev. master PRs only on user word
+(unsquashed + remote CI). Tier tag `[haiku|sonnet|opus-low|opus|codex]` = cheapest
+model that does the step. Design + safety: [DESIGN.md](DESIGN.md). Loop/CI/cron
+rules: `memory/eilandert/nginx-http-sentinel-module/workflow.md`.
 
 ## Phase 0 — Recon `[sonnet, investigator]`
 Self-contained module → recon maps code to **PORT**, not vars to read.
@@ -66,8 +68,15 @@ Each = own small PR. Full catalog + config examples: the pitch page (DESIGN.md l
       migrate configs, drop `libnginx-mod-error-abuse` from build. Track in
       error-abuse repo issues + sentinel HANDOFF.
 
+## CI / valgrind / fuzz (Phase 1 sets up; all phases extend)
+- [ ] `[sonnet]` `.github/workflows`: build-test, codeql, security-scanners (copy autocert/error-abuse)
+- [ ] `[sonnet]` valgrind + fuzz workflows = `workflow_dispatch` (manual) + `schedule` **monthly** (remote)
+- [ ] `[sonnet]` local CI script (`tools/ci-build.sh` + `test_runtime.py` + asan) — run before EVERY dev commit
+- [ ] `[sonnet]` host cron: local valgrind **weekly** + longer soak session; mirror builder02 fuzz/valgrind/soak pattern → mail failures. Add to `host-config/crontabs/`.
+- [ ] test every fn + every bug we hit = a t/ test in same commit
+
 ## Packaging / cross-cutting
-- [ ] `[sonnet]` add `.github/workflows` (copy autocert: build-test, codeql, fuzzing, security-scanners, valgrind)
+- [ ] `[sonnet]` add `.github/workflows` — see CI section above
 - [ ] `[sonnet]` add to `/opt/packages/modules/nginx/` + enable via `/nginx-modules-enable` → `libnginx-mod-sentinel`
 - [ ] `[sonnet]` `/nginx-modules-synopsis` after merge — public page
 - [ ] README cross-links to siblings + stack pages
