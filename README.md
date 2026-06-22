@@ -9,9 +9,17 @@ engine for nginx / angie. Fuses three defenses that all share one shape
 2. **AI-scraper / bad-bot tarpit** — when the score is bad, serve a cheap,
    bounded garbage drip instead of a clean 403, starving LLM scrapers and
    hostile crawlers.
-3. **JA4+ fingerprinting** — JA4 (TLS, from `ssl-fingerprint`) + JA4H (HTTP
-   header order, computed here) feed the score and survive TLS randomization
-   that defeats JA3/IP alone.
+3. **JA4+ fingerprinting** — JA4H (HTTP header order, in-module, Phase 1) feeds
+   the score and survives TLS randomization that defeats JA3/IP alone. JA4 (TLS
+   ClientHello) is **deferred to Phase 4** — it needs a core nginx patch
+   (ClientHello SSL callback), so it can't live in a pure HTTP module; JA4H
+   covers most TLS-randomized bots until then.
+
+**Self-contained: one module, no runtime sibling deps.** Sentinel *absorbs* the
+signal logic it needs (error-rate/scanner-path counter, UA/bot heuristics,
+JA4H) into its own source rather than reading sibling runtime vars. Phase 1–3
+ship with **zero core nginx patch**. The standalone `nginx-error-abuse-module`
+is **deprecated later** once sentinel's native error-rate signal covers it.
 
 > **Status: planning / Phase 0.** No module code yet. The full phased build plan
 > is in [TODO.md](TODO.md); the locked design decisions and safety rules are in
@@ -22,13 +30,14 @@ engine for nginx / angie. Fuses three defenses that all share one shape
 All three are the same pipeline at one decision point (`PREACCESS`):
 
 ```
-ClientHello/TCP ──ssl-fingerprint──► $ssl_ja4
-request ──► [sentinel] ─► score = w1·crowdsec(ip,ja4)
-                                 + w2·ja4_blocklist
-                                 + w3·bot/UA signal
-                                 + JA4H(headers, computed here)
+request ──► [sentinel] ─► score = w1·crowdsec(ip)        (Phase 3, out-of-band)
+                                 + w2·bot/UA signal       (in-module)
+                                 + w3·error-burst          (in-module, absorbed)
+                                 + w4·scanner-path         (in-module)
+                                 + JA4H(headers)           (in-module)
+                                 [+ JA4 TLS  — Phase 4, needs core patch]
             verdict:  low → allow
-                      mid → challenge (js-challenge / captcha)
+                      mid → challenge (built-in PoW / optional js-challenge)
                       hi  → tarpit (bounded drip)
                       max → 403
 ```
@@ -42,10 +51,11 @@ request ──► [sentinel] ─► score = w1·crowdsec(ip,ja4)
   opt-in.
 - **Bounded tarpit** — global concurrent-connection cap, tiny timers, fixed
   buffers, hard max lifetime. Never a self-DoS.
-- **Reuses the existing stack** — `ssl-fingerprint`, `keyval`, `bot-verifier`,
-  `user-agent`, `js-challenge` / `captcha`.
-- Zero new SSL patch: JA4 reuses `ssl-fingerprint`; JA4H is pure-HTTP and
-  computed in-module.
+- **Self-contained** — every signal computed in-module; no runtime sibling-module
+  dependency. Logic ported from `ssl-fingerprint` (JA4), `error-abuse`
+  (error-rate), `bot-verifier`/`user-agent` (bot/UA) into sentinel's own source.
+- Zero new SSL patch: JA4 uses the same patch-free ClientHello SSL callback
+  `ssl-fingerprint` proves out; JA4H is pure-HTTP.
 
 ## See also
 

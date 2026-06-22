@@ -4,22 +4,28 @@ Phased build plan. Each phase = own PR + CI-green + merge before next. Tier tag
 `[haiku|sonnet|opus-low|opus|codex]` = cheapest model that does the step. Design
 + safety rules: [DESIGN.md](DESIGN.md).
 
-## Phase 0 — Recon `[haiku/sonnet, investigator]`
+## Phase 0 — Recon `[sonnet, investigator]`
+Self-contained module → recon maps code to **PORT**, not vars to read.
 Compressed file:line map, no fixes. One agent.
-- [ ] ssl-fingerprint: exact JA4 var name(s) + export mechanism
-- [ ] keyval: lookup C API + zone declaration shape
-- [ ] bot-verifier + user-agent: vars/flags to read for score
-- [ ] js-challenge: how to hand a request off (redirect / named loc / var)
-- [ ] error-abuse: tarpit/drip prior-art + CI harness files to copy
-- [ ] output = integration map → Phase 1 spec
+- [ ] ssl-fingerprint: HOW it registers the ClientHello SSL callback (confirm
+      patch-free) + the JA4 byte-parse fn to port — file:line + fn names
+- [ ] error-abuse: error-rate/scanner-path counter logic + shmem counter shape
+      to absorb; tarpit/drip prior-art; CI harness files to copy
+- [ ] bot-verifier + user-agent: UA-parse + forward-confirmed-DNS verify fns to port
+- [ ] js-challenge: OPTIONAL soft handoff mechanism (redirect/named loc) — sentinel
+      has built-in PoW, this is just the optional bridge
+- [ ] shmem prior-art: rbtree+slab+TTL pattern from a sibling (error-abuse / dynamic-limit-req)
+- [ ] output = port map (what fn from where → which sentinel_*.c) → Phase 1 spec
 
 ## Phase 1 — Skeleton + score + decide `PR #1`
-Static data only (ja4 blocklist file + keyval zone). Verdict = allow / 403 / challenge. No tarpit, no live CrowdSec.
+Static data only (ja4 blocklist file + in-module feed). Verdict = allow / 403 / challenge. No tarpit, no live CrowdSec. **All signals in-module.**
 - [ ] `[sonnet]` `config` addon + `src/ngx_http_sentinel_module.c` skeleton
 - [ ] `[sonnet]` PREACCESS handler, conf create/merge, var registration
 - [ ] `[sonnet]` directives: `sentinel`, `sentinel_zone`, `sentinel_ja4_blocklist`, `sentinel_fail`, `sentinel_mode shadow|enforce`, `sentinel_threshold`
-- [ ] `[sonnet]` JA4H compute from headers → `$sentinel_ja4h` (fixed buffers, no malloc)
-- [ ] `[sonnet]` shmem ban/score table: rbtree+slab, TTL/LRU bound, locked
+- [ ] `[sonnet]` JA4H compute from headers → `$sentinel_ja4h` (fixed buffers, no malloc) — pure-HTTP, no patch
+- [ ] `[sonnet]` error-rate signal absorbed from error-abuse: port `ngx_http_error_abuse_record` sliding-window circular buffer + status-bitfield match → score input. Add scanner-path static match (.env/.git/wp-login, no regex)
+- [ ] `[sonnet]` UA/bot heuristics: port `ngx_http_user_agent_variable` trie+version-range → score input. (forward-DNS verify deferred to Phase 3 allowlist)
+- [ ] `[sonnet]` shmem ban/score table: rbtree+slab, TTL/LRU bound, locked — copy error-abuse `ngx_http_error_abuse_init_zone` + `rbtree_insert` pattern
 - [ ] `[opus-low]` score combine + action dispatch + fail-open path + shadow mode (score+log, no enforce) (security core)
 - [ ] `[sonnet]` vars `$sentinel_score $sentinel_verdict`
 - [ ] `[sonnet]` CI harness (copy error-abuse): ci-build + test_runtime + valgrind/asan/codeql; test every fn
@@ -44,14 +50,21 @@ Out-of-band sync; request path untouched.
 - [ ] `[codex]` audit
 - [ ] `[opus-low]` fixes → PR #3 → CI green → merge
 
-## Phase 4 — JA4T (optional, defer) `PR #4`
-- [ ] `[opus-low]` proxy_protocol v2 TLV → JA4T var → score. Only if traffic shows JA4/JA4H evasion.
+## Phase 4 — JA4 (TLS) + JA4T (patch-bearing, defer) `PR #4`
+Only if traffic shows JA4H/H2 evasion. Both need core surface beyond pure HTTP.
+- [ ] `[opus-low]` JA4 (TLS ClientHello): apply `ssl-fingerprint/patches/nginx-1.29.3+.patch` to build (SSL_CTX_set_client_hello_cb + ngx_ssl_connection_s fields); port JA4 byte-parse (`ngx_ssl_fingerprint_ja3`/ja4 fns) into `sentinel_ja4.c` → `$sentinel_ja4` → score. Patch must rebase per nginx release.
+- [ ] `[opus-low]` JA4T: proxy_protocol v2 TLV → JA4T var → score.
 
 ## Roadmap (post-core, incremental — layered on the score-then-act pipeline)
 Each = own small PR. Full catalog + config examples: the pitch page (DESIGN.md links it).
 - [ ] signals: HTTP/2 frame-order fingerprint; UA↔fingerprint coherence; datacenter/ASN (geoip2); velocity; scanner-path; honeypot; header-anomaly
 - [ ] actions: built-in proof-of-work challenge; throttle (bandwidth-cap); cache-only origin-shield; tarpit maze mode; CrowdSec verdict feedback
 - [ ] ops: per-route policy; allowlist (verified search engines + monitoring); metrics → VTS/statsd/OTel; structured decision log; TTL soft-bans
+
+## Deprecation — standalone error-abuse
+- [ ] after sentinel error-rate signal proven in prod: announce deprecation,
+      migrate configs, drop `libnginx-mod-error-abuse` from build. Track in
+      error-abuse repo issues + sentinel HANDOFF.
 
 ## Packaging / cross-cutting
 - [ ] `[sonnet]` add `.github/workflows` (copy autocert: build-test, codeql, fuzzing, security-scanners, valgrind)
