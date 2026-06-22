@@ -17,10 +17,10 @@ Compressed file:line map, no fixes. One agent.
 Static data only (ja4 blocklist file + keyval zone). Verdict = allow / 403 / challenge. No tarpit, no live CrowdSec.
 - [ ] `[sonnet]` `config` addon + `src/ngx_http_sentinel_module.c` skeleton
 - [ ] `[sonnet]` PREACCESS handler, conf create/merge, var registration
-- [ ] `[sonnet]` directives: `sentinel`, `sentinel_zone`, `sentinel_ja4_blocklist`, `sentinel_fail`, `sentinel_threshold`
+- [ ] `[sonnet]` directives: `sentinel`, `sentinel_zone`, `sentinel_ja4_blocklist`, `sentinel_fail`, `sentinel_mode shadow|enforce`, `sentinel_threshold`
 - [ ] `[sonnet]` JA4H compute from headers → `$sentinel_ja4h` (fixed buffers, no malloc)
 - [ ] `[sonnet]` shmem ban/score table: rbtree+slab, TTL/LRU bound, locked
-- [ ] `[opus-low]` score combine + action dispatch + fail-open path (security core)
+- [ ] `[opus-low]` score combine + action dispatch + fail-open path + shadow mode (score+log, no enforce) (security core)
 - [ ] `[sonnet]` vars `$sentinel_score $sentinel_verdict`
 - [ ] `[sonnet]` CI harness (copy error-abuse): ci-build + test_runtime + valgrind/asan/codeql; test every fn
 - [ ] `[codex]` audit Phase 1
@@ -46,6 +46,12 @@ Out-of-band sync; request path untouched.
 
 ## Phase 4 — JA4T (optional, defer) `PR #4`
 - [ ] `[opus-low]` proxy_protocol v2 TLV → JA4T var → score. Only if traffic shows JA4/JA4H evasion.
+
+## Roadmap (post-core, incremental — layered on the score-then-act pipeline)
+Each = own small PR. Full catalog + config examples: the pitch page (DESIGN.md links it).
+- [ ] signals: HTTP/2 frame-order fingerprint; UA↔fingerprint coherence; datacenter/ASN (geoip2); velocity; scanner-path; honeypot; header-anomaly
+- [ ] actions: built-in proof-of-work challenge; throttle (bandwidth-cap); cache-only origin-shield; tarpit maze mode; CrowdSec verdict feedback
+- [ ] ops: per-route policy; allowlist (verified search engines + monitoring); metrics → VTS/statsd/OTel; structured decision log; TTL soft-bans
 
 ## Packaging / cross-cutting
 - [ ] `[sonnet]` add `.github/workflows` (copy autocert: build-test, codeql, fuzzing, security-scanners, valgrind)

@@ -28,6 +28,9 @@ Locked decisions + non-negotiable safety rules. Read before coding any phase.
 6. **CrowdSec via stream/out-of-band, not live query.** Phase 3 feeds decisions
    from the existing lua bouncer (stream mode) → `keyval`/file → sentinel
    shared-mem. A native async LAPI client is explicitly deferred (complexity).
+7. **Shadow mode is first-class.** `sentinel_mode shadow` computes + logs the
+   score/verdict but enforces nothing. Ships in Phase 1 — thresholds must be
+   tunable against real traffic before any client is affected. `enforce` opt-in.
 
 ## Safety rules (every phase, enforced in CI)
 
@@ -69,6 +72,30 @@ sentinel_crowdsec_zone name;                          # decisions feed (Phase 3)
 directives with safe defaults. Verdict = first threshold crossed
 (block > tarpit > challenge > allow). Keep it a plain weighted sum — no ML, no
 regex, auditable.
+
+## Roadmap — signal & action catalog
+
+Core (Phases 1–3) ships JA4/JA4H, crowdsec + static ja4 blocklist, the score,
+shadow mode, and allow/challenge/tarpit/block. Everything below layers on the
+same score-then-act pipeline once core proves out. Full prose + config examples:
+the internal pitch page (deb.myguard.nl, noindex).
+
+**Signals (score inputs, all O(1) / no request-path network):**
+- JA4 (TLS, reused) · JA4H (HTTP header order, in-module) · JA4T (TCP, Phase 4)
+- HTTP/2 frame-order fingerprint (Akamai-style) — survives TLS randomization
+- UA ↔ fingerprint coherence — UA says Chrome, JA4H/H2 says curl ⇒ strong bot tell
+- datacenter/ASN reputation (reuse `geoip2`) · geo weighting
+- velocity (shared-mem sliding counter) · scanner-path behaviour (404 bursts, `.env`/`.git`/`wp-login`)
+- honeypot/canary hit ⇒ instant max score · header anomalies (missing Accept-Language, dup headers)
+
+**Actions (verdict dispatch, escalating):**
+- allow · observe(shadow) · challenge (js-challenge / captcha / built-in proof-of-work)
+- throttle (bandwidth-cap, don't drop) · cache-only (origin shield) · tarpit (drip / maze)
+- block (403/444) · feedback (push verdict back to CrowdSec — closes loop)
+
+**Ops/safety:** per-route policy · allowlist (forward-confirmed search engines via
+`bot-verifier`, monitoring IPs) · metrics → VTS/statsd/OTel · structured decision
+log · TTL soft-bans · `sentinel off` kill-switch.
 
 ## Module source layout (Phase 1+)
 
