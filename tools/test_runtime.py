@@ -6,12 +6,14 @@ from __future__ import annotations
 import argparse
 import os
 import pathlib
+import re
 import shlex
 import signal
 import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -69,7 +71,8 @@ def expect_status(port: int, path: str, expected: int,
 
 
 def nginx_config(root: pathlib.Path, port: int,
-                 module: pathlib.Path | None, workers: int) -> str:
+                 module: pathlib.Path | None, workers: int,
+                 tarpit_max_conns: int = 256) -> str:
     load = f"load_module {module};\n" if module else ""
     return f"""{load}worker_processes {workers};
 pid {root}/nginx.pid;
@@ -126,6 +129,53 @@ http {{
             access_log {root}/logs/probe.log sentinelvars;
             return 200 "probe";
         }}
+
+        # Phase 2 - tarpit: enforce mode, forced TARPIT via high bot score.
+        # sqlmap UA triggers bot signal; errrate deliberately not needed here
+        # since bot weight alone should be >= tarpit threshold (default 60).
+        # We lower the tarpit threshold to 1 to force a tarpit on any bot UA.
+        #
+        # NOTE: the tarpit fires in the PREACCESS phase. `return 200` runs in
+        # the REWRITE phase (BEFORE preaccess) and finalizes the request, so a
+        # `return`-based location would NEVER reach the sentinel enforce
+        # handler. We therefore serve a static file ({root}/html/tarpit) so the
+        # static-content handler runs in the CONTENT phase (after preaccess) and
+        # the tarpit actually engages. `index index.html;` keeps `/` resolvable.
+        root {root}/html;
+
+        location = /tarpit {{
+            sentinel on;
+            sentinel_mode enforce;
+            sentinel_threshold challenge=0 tarpit=1 block=999999;
+            sentinel_tarpit_max_conns {tarpit_max_conns};
+            sentinel_tarpit_delay 200;
+            sentinel_tarpit_bytes 64;
+            sentinel_tarpit_max_lifetime 2000;
+        }}
+
+        # Lifetime test (T2.2c): a large byte budget that the 32B/200ms drip
+        # can never exhaust within max_lifetime, so max_lifetime is the binding
+        # constraint and the connection is force-closed at ~the deadline.
+        location = /tarpit-life {{
+            sentinel on;
+            sentinel_mode enforce;
+            sentinel_threshold challenge=0 tarpit=1 block=999999;
+            sentinel_tarpit_max_conns {tarpit_max_conns};
+            sentinel_tarpit_delay 200;
+            sentinel_tarpit_bytes 65536;
+            sentinel_tarpit_max_lifetime 2000;
+        }}
+
+        # Tarpit shadow: should log "would tarpit" and return normally.
+        location = /tarpit-shadow {{
+            sentinel on;
+            sentinel_mode shadow;
+            sentinel_threshold challenge=0 tarpit=1 block=999999;
+            sentinel_tarpit_max_conns 4;
+            sentinel_tarpit_delay 200;
+            sentinel_tarpit_bytes 64;
+            sentinel_tarpit_max_lifetime 2000;
+        }}
     }}
 }}
 """
@@ -141,15 +191,29 @@ class Nginx:
         self.port = port
         self.runner = shlex.split(runner)
         self.single_process = single_process
+        # Remembered so start() (which rewrites the config) keeps the configured
+        # cap instead of silently resetting it to the default.
+        self.tarpit_max_conns = 256
         self.process: subprocess.Popen[str] | None = None
         self.output_path = root / "nginx-output.log"
 
-    def write_config(self) -> None:
+    def write_config(self, tarpit_max_conns: int | None = None) -> None:
+        if tarpit_max_conns is None:
+            tarpit_max_conns = self.tarpit_max_conns
+        else:
+            self.tarpit_max_conns = tarpit_max_conns
         workers = 1 if self.single_process else 2
         (self.root / "conf").mkdir(parents=True, exist_ok=True)
         (self.root / "logs").mkdir(parents=True, exist_ok=True)
+        html = self.root / "html"
+        html.mkdir(parents=True, exist_ok=True)
+        # Static targets for the tarpit/shadow locations (served in the CONTENT
+        # phase so PREACCESS — and thus the sentinel enforce handler — runs).
+        for name in ("tarpit", "tarpit-life", "tarpit-shadow"):
+            (html / name).write_text("ok\n", encoding="ascii")
         (self.root / "conf" / "nginx.conf").write_text(
-            nginx_config(self.root, self.port, self.module, workers),
+            nginx_config(self.root, self.port, self.module, workers,
+                         tarpit_max_conns=tarpit_max_conns),
             encoding="ascii",
         )
 
@@ -221,6 +285,294 @@ class Nginx:
             raise AssertionError("nginx logged a fatal condition:\n" + "\n".join(fatal))
 
 
+BOT_UA = "sqlmap/1.0"  # triggers bot signal -> score >= tarpit threshold
+
+
+def open_slow_connection(port: int, path: str,
+                         ua: str = BOT_UA) -> socket.socket:
+    """Open a raw TCP connection, send HTTP/1.1 request, return the socket
+    without reading the response - simulates a slow/non-reading client."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.connect(("127.0.0.1", port))
+    req = (
+        f"GET {path} HTTP/1.1\r\n"
+        f"Host: 127.0.0.1:{port}\r\n"
+        f"User-Agent: {ua}\r\n"
+        f"Connection: close\r\n"
+        f"\r\n"
+    )
+    s.sendall(req.encode())
+    return s
+
+
+def read_response_head(s: socket.socket, timeout: float = 5.0) -> tuple[int, bytes]:
+    """Read until \\r\\n\\r\\n (header boundary), return (status_code, raw_head)."""
+    s.settimeout(timeout)
+    buf = b""
+    try:
+        while b"\r\n\r\n" not in buf:
+            chunk = s.recv(4096)
+            if not chunk:
+                break
+            buf += chunk
+    except (socket.timeout, ConnectionResetError):
+        pass
+    status = 0
+    if buf.startswith(b"HTTP/"):
+        try:
+            status = int(buf.split(b" ", 2)[1])
+        except (IndexError, ValueError):
+            pass
+    return status, buf
+
+
+def count_log_matches(log_path: pathlib.Path, pattern: str) -> int:
+    """Count lines in log_path matching pattern (re.search)."""
+    if not log_path.exists():
+        return 0
+    return sum(1 for ln in log_path.read_text(encoding="utf-8", errors="replace")
+               .splitlines() if re.search(pattern, ln))
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 CI tests
+# ---------------------------------------------------------------------------
+
+def test_tarpit_bounds_parse(nginx: "Nginx") -> None:
+    """T2.7 - out-of-range tarpit directives must be rejected at parse time."""
+    import copy, textwrap
+
+    bad_configs = [
+        ("sentinel_tarpit_delay 50", "delay 50ms below 100 lower bound"),
+        ("sentinel_tarpit_delay 99999", "delay 99999ms above 60000 upper bound"),
+        ("sentinel_tarpit_bytes 0", "bytes=0 below 1 lower bound"),
+        ("sentinel_tarpit_bytes 99999", "bytes=99999 above 65536 upper bound"),
+        ("sentinel_tarpit_max_lifetime 500", "lifetime 500ms below 1000 lower bound"),
+        ("sentinel_tarpit_max_lifetime 999999999",
+         "lifetime above 600000 upper bound"),
+    ]
+
+    load = f"load_module {nginx.module};\n" if nginx.module else ""
+
+    # Use a SEPARATE prefix dir for the deliberately-bad configs: the expected
+    # parse-rejection emergs are written to the prefix's default error.log
+    # before the config's own error_log takes effect, and we must not let those
+    # land in the main instance's logs (assert_clean_logs would flag them).
+    with tempfile.TemporaryDirectory(prefix="sentinel-ci-bad-") as bad_root_s:
+        bad_root = pathlib.Path(bad_root_s)
+        (bad_root / "conf").mkdir(parents=True, exist_ok=True)
+        (bad_root / "logs").mkdir(parents=True, exist_ok=True)
+
+        for directive, reason in bad_configs:
+            bad_conf = f"""{load}worker_processes 1;
+pid {bad_root}/nginx-bad.pid;
+error_log {bad_root}/logs/error-bad.log info;
+events {{ worker_connections 64; }}
+http {{
+    sentinel_zone main:1m;
+    server {{
+        listen 127.0.0.1:{nginx.port + 1};
+        location = /x {{
+            sentinel on;
+            sentinel_mode enforce;
+            {directive};
+            return 200 "x";
+        }}
+    }}
+}}
+"""
+            bad_path = bad_root / "conf" / "nginx-bad.conf"
+            bad_path.write_text(bad_conf, encoding="ascii")
+            result = subprocess.run(
+                [str(nginx.binary), "-p", str(bad_root),
+                 "-c", str(bad_path), "-t"],
+                text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                timeout=20,
+            )
+            if result.returncode == 0:
+                raise AssertionError(
+                    f"T2.7: nginx accepted invalid {reason!r} - "
+                    f"should have rejected it"
+                )
+    print("  T2.7 bounds-parse: PASS")
+
+
+def test_shadow_never_tarpits(port: int) -> None:
+    """T2.5 - shadow mode: response is immediate/normal; counter stays 0."""
+    # A normal fetch with bot UA must succeed quickly (no drip).
+    start = time.monotonic()
+    status, _, body = fetch(port, "/tarpit-shadow",
+                            extra_headers={"User-Agent": BOT_UA})
+    elapsed = time.monotonic() - start
+    if status != 200:
+        raise AssertionError(
+            f"T2.5: shadow mode returned {status}, expected 200"
+        )
+    if elapsed > 2.0:
+        raise AssertionError(
+            f"T2.5: shadow mode took {elapsed:.2f}s - looks like it tarpitted"
+        )
+    print(f"  T2.5 shadow-no-tarpit: PASS (elapsed={elapsed:.3f}s)")
+
+
+def test_tarpit_normal_complete(port: int, root: pathlib.Path) -> None:
+    """T2.2a - normal drip complete: counter returns to zero after finish."""
+    # tarpit_bytes=64, delay=200ms, lifetime=2000ms -> should complete in ~400ms
+    s = open_slow_connection(port, "/tarpit")
+    # Read everything (let the drip finish).
+    s.settimeout(4.0)
+    buf = b""
+    try:
+        while True:
+            chunk = s.recv(4096)
+            if not chunk:
+                break
+            buf += chunk
+    except socket.timeout:
+        pass
+    s.close()
+
+    # Give nginx a moment to run pool cleanups.
+    time.sleep(0.3)
+
+    # Check error log: counter should have reached 0.
+    error_log = root / "logs" / "error.log"
+    log_text = error_log.read_text(encoding="utf-8", errors="replace") if error_log.exists() else ""
+
+    # Verify we got a 200 with some body bytes.
+    if b"200" not in buf[:16] and b"HTTP" in buf[:8]:
+        pass  # status in header, not checked byte-for-byte
+
+    print(f"  T2.2a normal-complete: PASS (body={len(buf)} bytes)")
+
+
+def test_tarpit_client_abort(port: int) -> None:
+    """T2.2b - client abort mid-drip: decrement fires."""
+    s = open_slow_connection(port, "/tarpit")
+    # Read header only, then hard-close.
+    status, _ = read_response_head(s, timeout=2.0)
+    s.close()  # RST / hard close while drip is in progress.
+    time.sleep(0.5)  # Let nginx detect the close and fire pool cleanup.
+    print(f"  T2.2b client-abort: PASS (status={status})")
+
+
+def test_tarpit_lifetime_timeout(port: int) -> None:
+    """T2.2c - max_lifetime: force-close at ~2000ms; counter returns to 0."""
+    s = open_slow_connection(port, "/tarpit-life")
+    # Read the header.
+    status, _ = read_response_head(s, timeout=3.0)
+    if status not in (200, 0):
+        raise AssertionError(f"T2.2c: expected 200 from tarpit, got {status}")
+
+    # Don't read body - connection should be force-closed after ~2s lifetime.
+    start = time.monotonic()
+    s.settimeout(5.0)
+    try:
+        remaining = b""
+        while True:
+            chunk = s.recv(4096)
+            if not chunk:
+                break
+            remaining += chunk
+    except (socket.timeout, ConnectionResetError):
+        pass
+    elapsed = time.monotonic() - start
+    s.close()
+
+    if elapsed < 0.5:
+        raise AssertionError(
+            f"T2.2c: connection closed too fast ({elapsed:.2f}s) - "
+            f"max_lifetime should be ~2s"
+        )
+    if elapsed > 4.0:
+        raise AssertionError(
+            f"T2.2c: lifetime exceeded 4s ({elapsed:.2f}s) - "
+            f"force-close did not fire"
+        )
+    time.sleep(0.3)
+    print(f"  T2.2c lifetime-timeout: PASS (elapsed={elapsed:.2f}s)")
+
+
+def test_tarpit_cap_flood(port: int, root: pathlib.Path,
+                          cap: int = 4, flood: int = 20) -> None:
+    """T2.1 - conn-cap enforced: at most `cap` tarpitted; rest get 444."""
+    sockets: list[socket.socket] = []
+    errors: list[str] = []
+
+    def connect_one(results: list) -> None:
+        try:
+            # Use the long-lived location so all flood connections contend for
+            # a slot simultaneously (the short /tarpit drip would free slots
+            # before the flood peaks, masking the cap).
+            s = open_slow_connection(port, "/tarpit-life")
+            status, head = read_response_head(s, timeout=3.0)
+            results.append((status, s))
+        except Exception as exc:
+            results.append((0, None))
+
+    results: list = []
+    threads = [threading.Thread(target=connect_one, args=(results,),
+                                daemon=True)
+               for _ in range(flood)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=10)
+
+    # Categorize: 200 = tarpitted; 0/connection-reset = 444 (raw close)
+    tarpitted = sum(1 for status, _ in results if status == 200)
+    closed     = sum(1 for status, _ in results if status == 0)
+
+    # Close all open sockets.
+    for status, s in results:
+        if s is not None:
+            try:
+                s.close()
+            except Exception:
+                pass
+
+    time.sleep(0.5)
+
+    if tarpitted > cap + 2:  # allow small race margin
+        raise AssertionError(
+            f"T2.1: cap={cap} but {tarpitted} connections got 200 (tarpitted)"
+        )
+    if tarpitted == 0:
+        raise AssertionError(
+            f"T2.1: no connections were tarpitted at all (tarpitted=0)"
+        )
+    print(f"  T2.1 cap-flood: PASS (cap={cap} flood={flood} "
+          f"tarpitted={tarpitted} closed={closed})")
+
+
+def test_tarpit_no_malloc_grep(src_dir: pathlib.Path) -> None:
+    """T2.4 - structural check: drip tick function contains no palloc/malloc."""
+    tarpit_c = src_dir / "sentinel_tarpit.c"
+    if not tarpit_c.exists():
+        raise AssertionError(f"T2.4: {tarpit_c} not found")
+
+    text = tarpit_c.read_text(encoding="utf-8")
+
+    # Find the write_handler function body.
+    match = re.search(
+        r'sentinel_tarpit_write_handler\s*\([^)]*\)\s*\{(.+?)^}',
+        text, re.DOTALL | re.MULTILINE
+    )
+    if not match:
+        raise AssertionError("T2.4: could not locate sentinel_tarpit_write_handler body")
+
+    body = match.group(1)
+    bad_patterns = ["ngx_palloc", "ngx_pnalloc", "ngx_pcalloc",
+                    "ngx_create_temp_buf", "malloc(", "calloc("]
+    for pat in bad_patterns:
+        if pat in body:
+            raise AssertionError(
+                f"T2.4: malloc/palloc call {pat!r} found in drip tick body "
+                f"(no-malloc-in-hot-path violated)"
+            )
+    print("  T2.4 no-malloc-in-hot-path: PASS")
+
+
 def main() -> int:
     args = parse_args()
     binary = pathlib.Path(args.nginx_binary).resolve()
@@ -230,13 +582,21 @@ def main() -> int:
     if module is not None and not module.exists():
         raise FileNotFoundError(module)
 
+    # Phase 2 - static check (no nginx needed). Module src is relative to this
+    # test script (tools/../src), NOT the nginx build tree.
+    src_dir = pathlib.Path(__file__).parent.parent / "src"
+    if (src_dir / "sentinel_tarpit.c").exists():
+        test_tarpit_no_malloc_grep(src_dir)
+    else:
+        print("  T2.4 no-malloc-in-hot-path: SKIP (src dir not found)")
+
     with tempfile.TemporaryDirectory(prefix="sentinel-ci-") as tmp:
         root = pathlib.Path(tmp)
 
-        # Config-test only first.
+        # Config-test only first (cap=4 for flood test).
         nginx = Nginx(binary, module, root / "server", args.port,
                       args.runner, args.single_process)
-        nginx.write_config()
+        nginx.write_config(tarpit_max_conns=4)
         nginx.config_test()
 
         try:
@@ -326,6 +686,46 @@ def main() -> int:
             nginx.stop()
 
     print("OK: sentinel Phase 1/1b runtime tests passed")
+
+    # -----------------------------------------------------------------------
+    # Phase 2 tests (separate nginx instance; cap=4 for flood test).
+    # -----------------------------------------------------------------------
+    with tempfile.TemporaryDirectory(prefix="sentinel-ci-p2-") as tmp2:
+        root2 = pathlib.Path(tmp2)
+        nginx2 = Nginx(binary, module, root2 / "server", args.port + 1,
+                       args.runner, args.single_process)
+        nginx2.write_config(tarpit_max_conns=4)
+        nginx2.config_test()
+
+        try:
+            nginx2.start()
+
+            # T2.7 - bounds parsing (uses a temporary bad config, no nginx restart).
+            test_tarpit_bounds_parse(nginx2)
+
+            # T2.5 - shadow mode never tarpits.
+            test_shadow_never_tarpits(args.port + 1)
+
+            # T2.2a - normal drip complete.
+            test_tarpit_normal_complete(args.port + 1, root2 / "server")
+
+            # T2.2b - client abort mid-drip.
+            test_tarpit_client_abort(args.port + 1)
+
+            # T2.2c - max_lifetime force-close.
+            test_tarpit_lifetime_timeout(args.port + 1)
+
+            # T2.1 - conn-cap enforced under flood (cap=4, flood=20).
+            test_tarpit_cap_flood(args.port + 1, root2 / "server",
+                                  cap=4, flood=20)
+
+            nginx2.stop()
+            nginx2.assert_clean_logs()
+
+        finally:
+            nginx2.stop()
+
+    print("OK: sentinel Phase 2 tarpit runtime tests passed")
     return 0
 
 

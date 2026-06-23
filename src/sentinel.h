@@ -58,6 +58,20 @@
 #define NGX_SENTINEL_SCORE_MAX         100000
 
 /* -------------------------------------------------------------------------
+ * Phase 2 — Tarpit constants
+ * ---------------------------------------------------------------------- */
+
+/* Hard upper bound for tarpit_max_lifetime (ms). */
+#define NGX_SENTINEL_TARPIT_MAX_MSEC   600000   /* 10 minutes */
+
+/* Size of the process-global static drip buffer. Also the upper bound for
+ * tarpit_bytes (per spec: same value). */
+#define NGX_SENTINEL_TARPIT_TICK_MAX   65536
+
+/* Bytes emitted per drip tick (small constant; keeps individual writes tiny). */
+#define NGX_SENTINEL_TARPIT_TICK_BYTES 32
+
+/* -------------------------------------------------------------------------
  * Verdict enum
  * ---------------------------------------------------------------------- */
 
@@ -167,7 +181,9 @@ typedef struct {
  * ---------------------------------------------------------------------- */
 
 typedef struct {
-    ngx_array_t  zones;   /* ngx_sentinel_zone_t[] */
+    ngx_array_t   zones;        /* ngx_sentinel_zone_t[]                            */
+    ngx_atomic_t *tarpit_conns; /* per-worker sub-counters [NGX_MAX_PROCESSES]      */
+                                /* allocated in dedicated shm at sentinel_zone init  */
 } ngx_sentinel_main_conf_t;
 
 typedef struct {
@@ -177,6 +193,12 @@ typedef struct {
     ngx_sentinel_zone_t     *zone;      /* pointer into main conf zones array */
     ngx_sentinel_threshold_t threshold;
     ngx_sentinel_weights_t   weights;
+
+    /* Phase 2 — tarpit parameters */
+    ngx_int_t                tarpit_max_conns;    /* global cap across workers      */
+    ngx_int_t                tarpit_delay;        /* ms between drip ticks          */
+    ngx_int_t                tarpit_bytes;        /* total bytes to drip (cap)      */
+    ngx_int_t                tarpit_max_lifetime; /* hard force-close ceiling (ms)  */
 } ngx_sentinel_loc_conf_t;
 
 /* -------------------------------------------------------------------------
@@ -257,6 +279,29 @@ ngx_int_t sentinel_score_compute(const ngx_sentinel_inputs_t *inputs,
  */
 ngx_sentinel_verdict_e sentinel_score_to_verdict(ngx_int_t score,
     const ngx_sentinel_threshold_t *thr);
+
+/* -------------------------------------------------------------------------
+ * Tarpit API (sentinel_tarpit.c)
+ * ---------------------------------------------------------------------- */
+
+/*
+ * sentinel_tarpit_start — dispatch a tarpitted connection.
+ * Must be called from the PREACCESS handler when verdict == TARPIT and
+ * shadow mode is off.
+ *
+ * Returns:
+ *   NGX_DONE        — tarpit running; caller MUST return NGX_DONE
+ *   NGX_HTTP_CLOSE  — at cap (max_conns); caller returns NGX_HTTP_CLOSE (444)
+ *   NGX_DECLINED    — fail-open setup error; caller allows (NGX_DECLINED)
+ */
+ngx_int_t sentinel_tarpit_start(ngx_http_request_t *r,
+    ngx_sentinel_loc_conf_t *lcf);
+
+/*
+ * sentinel_tarpit_init_process — zero this worker's sub-counter slot.
+ * Called from the module init_process hook to self-heal after hard kills.
+ */
+ngx_int_t sentinel_tarpit_init_process(ngx_cycle_t *cycle);
 
 /* -------------------------------------------------------------------------
  * Variable index (set by ngx_http_sentinel_module.c, used by sub-files)

@@ -49,6 +49,24 @@ non-negative integer.
 | `sentinel_weight_scanner N;` | `50` | Added once when the request URI matches a known scanner path prefix. |
 | `sentinel_weight_bot N;` | `30` | Added once when the User-Agent header matches a heuristic bot-UA pattern. |
 
+### Tarpit (location context)
+
+When the verdict is `tarpit`, the connection is held by a bounded "drip" writer
+instead of being answered or dropped — slow, cheap to the server, expensive to
+the bot. The tarpit is globally connection-capped (a per-worker shared-memory
+counter summed across workers); at the cap, further tarpit verdicts are closed
+immediately with `444` rather than queued. Decrement happens on every exit path
+via a single request-pool cleanup, so the counter can never leak. Only active in
+`enforce` mode; in `shadow` mode a "would tarpit" line is logged and the request
+passes.
+
+| Directive | Default | Bounds | Description |
+|---|---|---|---|
+| `sentinel_tarpit_max_conns N;` | `256` | `0`–`65536` | Global cap on concurrently tarpitted connections. `0` disables the tarpit (verdict downgrades to immediate `444`). |
+| `sentinel_tarpit_delay ms;` | `5000` | `100`–`60000` | Delay between drip ticks. |
+| `sentinel_tarpit_bytes N;` | `1024` | `1`–`65536` | Total bytes dripped before the response completes. |
+| `sentinel_tarpit_max_lifetime ms;` | `30000` | `1000`–`600000` | Hard ceiling on how long a tarpitted connection is held; force-closed at the deadline regardless of drip progress. |
+
 ### Scoring model
 
 ```

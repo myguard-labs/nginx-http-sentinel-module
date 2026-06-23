@@ -39,6 +39,19 @@ static char *ngx_sentinel_set_mode(ngx_conf_t *cf,
 static char *ngx_sentinel_set_fail(ngx_conf_t *cf,
     ngx_command_t *cmd, void *conf);
 
+static char *ngx_sentinel_set_tarpit_delay(ngx_conf_t *cf,
+    ngx_command_t *cmd, void *conf);
+static char *ngx_sentinel_set_tarpit_bytes(ngx_conf_t *cf,
+    ngx_command_t *cmd, void *conf);
+static char *ngx_sentinel_set_tarpit_lifetime(ngx_conf_t *cf,
+    ngx_command_t *cmd, void *conf);
+
+static ngx_int_t ngx_sentinel_init_process(ngx_cycle_t *cycle);
+static ngx_int_t ngx_sentinel_init_tarpit_shm(ngx_conf_t *cf,
+    ngx_sentinel_main_conf_t *mcf);
+static ngx_int_t ngx_sentinel_tarpit_shm_init(ngx_shm_zone_t *shm_zone,
+    void *data);
+
 static ngx_int_t ngx_sentinel_var_score(ngx_http_request_t *r,
     ngx_http_variable_value_t *v, uintptr_t data);
 static ngx_int_t ngx_sentinel_var_verdict(ngx_http_request_t *r,
@@ -126,6 +139,40 @@ static ngx_command_t ngx_sentinel_commands[] = {
       offsetof(ngx_sentinel_loc_conf_t, weights.bot),
       NULL },
 
+    /* ---- Phase 2: tarpit directives ---- */
+
+    /* sentinel_tarpit_max_conns N;  default 256; 0=disabled (all TARPIT->444) */
+    { ngx_string("sentinel_tarpit_max_conns"),
+      NGX_HTTP_LOC_CONF | NGX_CONF_TAKE1,
+      ngx_conf_set_num_slot,
+      NGX_HTTP_LOC_CONF_OFFSET,
+      offsetof(ngx_sentinel_loc_conf_t, tarpit_max_conns),
+      NULL },
+
+    /* sentinel_tarpit_delay ms;  default 5000; bounds [100, 60000] */
+    { ngx_string("sentinel_tarpit_delay"),
+      NGX_HTTP_LOC_CONF | NGX_CONF_TAKE1,
+      ngx_sentinel_set_tarpit_delay,
+      NGX_HTTP_LOC_CONF_OFFSET,
+      0,
+      NULL },
+
+    /* sentinel_tarpit_bytes N;  default 1024; bounds [1, 65536] */
+    { ngx_string("sentinel_tarpit_bytes"),
+      NGX_HTTP_LOC_CONF | NGX_CONF_TAKE1,
+      ngx_sentinel_set_tarpit_bytes,
+      NGX_HTTP_LOC_CONF_OFFSET,
+      0,
+      NULL },
+
+    /* sentinel_tarpit_max_lifetime ms;  default 30000; bounds [1000, 600000] */
+    { ngx_string("sentinel_tarpit_max_lifetime"),
+      NGX_HTTP_LOC_CONF | NGX_CONF_TAKE1,
+      ngx_sentinel_set_tarpit_lifetime,
+      NGX_HTTP_LOC_CONF_OFFSET,
+      0,
+      NULL },
+
     ngx_null_command
 };
 
@@ -156,9 +203,9 @@ ngx_module_t ngx_http_sentinel_module = {
     &ngx_sentinel_module_ctx,   /* module context    */
     ngx_sentinel_commands,      /* module directives */
     NGX_HTTP_MODULE,            /* module type       */
-    NULL,                       /* init master       */
-    NULL,                       /* init module       */
-    NULL,                       /* init process      */
+    NULL,                              /* init master       */
+    NULL,                              /* init module       */
+    ngx_sentinel_init_process,         /* init process      */
     NULL,                       /* init thread       */
     NULL,                       /* exit thread       */
     NULL,                       /* exit process      */
@@ -383,10 +430,31 @@ ngx_sentinel_preaccess_handler(ngx_http_request_t *r)
         return NGX_DECLINED;
 
     case NGX_SENTINEL_VERDICT_TARPIT:
-        /* TODO Phase 2: tarpit drip write, connection cap */
-        ngx_log_error(NGX_LOG_INFO, r->connection->log, 0,
-                      "sentinel: verdict=tarpit (enforce deferred Phase 2)");
-        return NGX_DECLINED;
+        {
+            ngx_int_t  trc;
+
+            if (lcf->tarpit_max_conns == 0) {
+                /* Tarpit disabled — downgrade to immediate 444. */
+                ngx_log_error(NGX_LOG_INFO, r->connection->log, 0,
+                              "sentinel: tarpit disabled (max_conns=0) -> 444");
+                return NGX_HTTP_CLOSE;
+            }
+
+            trc = sentinel_tarpit_start(r, lcf);
+
+            if (trc == NGX_DONE) {
+                return NGX_DONE;  /* owns the connection */
+            }
+
+            if (trc == NGX_HTTP_CLOSE) {
+                return NGX_HTTP_CLOSE;  /* at cap -> 444 */
+            }
+
+            /* Any setup error: fail-open. */
+            ngx_log_error(NGX_LOG_WARN, r->connection->log, 0,
+                          "sentinel: tarpit setup error (fail-open)");
+            return NGX_DECLINED;
+        }
 
     case NGX_SENTINEL_VERDICT_BLOCK:
         /* TODO Phase 2: return 403 / 444 */
@@ -469,10 +537,44 @@ ngx_sentinel_log_handler(ngx_http_request_t *r)
  * ---------------------------------------------------------------------- */
 
 static ngx_int_t
+ngx_sentinel_init_tarpit_shm(ngx_conf_t *cf, ngx_sentinel_main_conf_t *mcf)
+{
+    ngx_str_t      name = ngx_string("sentinel_tarpit_conns");
+    ngx_shm_zone_t *shm;
+    size_t          size;
+
+    /*
+     * The zone is slab-managed (ngx_init_zone_pool slab-initializes every
+     * shared zone). Size it for the slab header + metadata plus the small
+     * NGX_MAX_PROCESSES atomic array. Eight pages clears the slab minimum
+     * (slot bitmap + page-table overhead) with comfortable headroom.
+     */
+    size = 8 * ngx_pagesize;
+
+    shm = ngx_shared_memory_add(cf, &name, size, &ngx_http_sentinel_module);
+    if (shm == NULL) {
+        return NGX_ERROR;
+    }
+
+    /*
+     * shm->data holds the current-cycle mcf so the init callback can wire
+     * mcf->tarpit_conns. It is only read inside the cycle that set it (never
+     * carried across cycles), and the counter array itself is slab-allocated
+     * inside the zone and survives reload via shpool->data — see
+     * ngx_sentinel_tarpit_shm_init.
+     */
+    shm->data = mcf;
+    shm->init = ngx_sentinel_tarpit_shm_init;
+
+    return NGX_OK;
+}
+
+static ngx_int_t
 ngx_sentinel_init(ngx_conf_t *cf)
 {
     ngx_http_handler_pt        *h;
     ngx_http_core_main_conf_t  *cmcf;
+    ngx_sentinel_main_conf_t   *mcf;
 
     cmcf = ngx_http_conf_get_module_main_conf(cf, ngx_http_core_module);
 
@@ -489,6 +591,14 @@ ngx_sentinel_init(ngx_conf_t *cf)
     }
 
     *h = ngx_sentinel_log_handler;
+
+    /* Allocate dedicated shm segment for per-worker tarpit sub-counters. */
+    mcf = ngx_http_conf_get_module_main_conf(cf, ngx_http_sentinel_module);
+    if (mcf != NULL) {
+        if (ngx_sentinel_init_tarpit_shm(cf, mcf) != NGX_OK) {
+            return NGX_ERROR;
+        }
+    }
 
     return NGX_OK;
 }
@@ -539,6 +649,11 @@ ngx_sentinel_create_loc_conf(ngx_conf_t *cf)
     lcf->weights.scanner = NGX_CONF_UNSET;
     lcf->weights.bot     = NGX_CONF_UNSET;
 
+    lcf->tarpit_max_conns    = NGX_CONF_UNSET;
+    lcf->tarpit_delay        = NGX_CONF_UNSET;
+    lcf->tarpit_bytes        = NGX_CONF_UNSET;
+    lcf->tarpit_max_lifetime = NGX_CONF_UNSET;
+
     return lcf;
 }
 
@@ -574,6 +689,40 @@ ngx_sentinel_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
     ngx_conf_merge_value(conf->weights.bot,
                          prev->weights.bot,
                          NGX_SENTINEL_DEFAULT_W_BOT);
+
+    ngx_conf_merge_value(conf->tarpit_max_conns,
+                         prev->tarpit_max_conns, 256);
+    ngx_conf_merge_value(conf->tarpit_delay,
+                         prev->tarpit_delay, 5000);
+    ngx_conf_merge_value(conf->tarpit_bytes,
+                         prev->tarpit_bytes, 1024);
+    ngx_conf_merge_value(conf->tarpit_max_lifetime,
+                         prev->tarpit_max_lifetime, 30000);
+
+    /* Bounds validation (reject out-of-range values that slipped through). */
+    if (conf->tarpit_max_conns < 0 || conf->tarpit_max_conns > 65536) {
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                           "sentinel_tarpit_max_conns must be 0..65536");
+        return NGX_CONF_ERROR;
+    }
+    if (conf->tarpit_delay < 100 || conf->tarpit_delay > 60000) {
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                           "sentinel_tarpit_delay must be 100..60000 ms");
+        return NGX_CONF_ERROR;
+    }
+    if (conf->tarpit_bytes < 1 || conf->tarpit_bytes > 65536) {
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                           "sentinel_tarpit_bytes must be 1..65536");
+        return NGX_CONF_ERROR;
+    }
+    if (conf->tarpit_max_lifetime < 1000
+        || conf->tarpit_max_lifetime > NGX_SENTINEL_TARPIT_MAX_MSEC)
+    {
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                           "sentinel_tarpit_max_lifetime must be 1000..%d ms",
+                           NGX_SENTINEL_TARPIT_MAX_MSEC);
+        return NGX_CONF_ERROR;
+    }
 
     /* inherit zone pointer from parent if not set locally */
     if (conf->zone == NULL) {
@@ -763,4 +912,126 @@ bad:
     }
 
     return NGX_CONF_OK;
+}
+
+/* -------------------------------------------------------------------------
+ * Phase 2 — tarpit directive handlers (bounds validated at parse time).
+ * ---------------------------------------------------------------------- */
+
+static char *
+ngx_sentinel_set_tarpit_delay(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
+{
+    ngx_sentinel_loc_conf_t  *lcf = conf;
+    ngx_str_t                *value;
+    ngx_int_t                 v;
+
+    value = cf->args->elts;
+    v = ngx_atoi(value[1].data, value[1].len);
+
+    if (v == NGX_ERROR || v < 100 || v > 60000) {
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                           "sentinel_tarpit_delay must be 100..60000 ms, got \"%V\"",
+                           &value[1]);
+        return NGX_CONF_ERROR;
+    }
+
+    lcf->tarpit_delay = v;
+    return NGX_CONF_OK;
+}
+
+static char *
+ngx_sentinel_set_tarpit_bytes(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
+{
+    ngx_sentinel_loc_conf_t  *lcf = conf;
+    ngx_str_t                *value;
+    ngx_int_t                 v;
+
+    value = cf->args->elts;
+    v = ngx_atoi(value[1].data, value[1].len);
+
+    if (v == NGX_ERROR || v < 1 || v > 65536) {
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                           "sentinel_tarpit_bytes must be 1..65536, got \"%V\"",
+                           &value[1]);
+        return NGX_CONF_ERROR;
+    }
+
+    lcf->tarpit_bytes = v;
+    return NGX_CONF_OK;
+}
+
+static char *
+ngx_sentinel_set_tarpit_lifetime(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
+{
+    ngx_sentinel_loc_conf_t  *lcf = conf;
+    ngx_str_t                *value;
+    ngx_int_t                 v;
+
+    value = cf->args->elts;
+    v = ngx_atoi(value[1].data, value[1].len);
+
+    if (v == NGX_ERROR || v < 1000 || v > NGX_SENTINEL_TARPIT_MAX_MSEC) {
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                           "sentinel_tarpit_max_lifetime must be 1000..%d ms, "
+                           "got \"%V\"",
+                           NGX_SENTINEL_TARPIT_MAX_MSEC, &value[1]);
+        return NGX_CONF_ERROR;
+    }
+
+    lcf->tarpit_max_lifetime = v;
+    return NGX_CONF_OK;
+}
+
+/* -------------------------------------------------------------------------
+ * Tarpit shm init callback: wire the per-worker counter array into mcf.
+ * ---------------------------------------------------------------------- */
+
+static ngx_int_t
+ngx_sentinel_tarpit_shm_init(ngx_shm_zone_t *shm_zone, void *data)
+{
+    ngx_sentinel_main_conf_t  *mcf;
+    ngx_slab_pool_t           *shpool;
+    ngx_atomic_t              *conns;
+
+    /*
+     * shm_zone->data carries the CURRENT cycle's mcf (set in
+     * ngx_sentinel_init_tarpit_shm). It is only dereferenced here, within the
+     * cycle that owns it, so it is always valid — we never carry a stale conf
+     * pointer across cycles. The counter array itself lives inside the slab
+     * pool (survives reload via shpool->data), NOT at raw shm.addr: every
+     * shared zone is slab-initialized by ngx_init_zone_pool() before this
+     * callback runs, so writing raw bytes over shm.addr would clobber the slab
+     * pool header (and its mutex, which the master force-unlocks on SIGCHLD →
+     * SIGSEGV).
+     */
+    mcf    = shm_zone->data;
+    shpool = (ngx_slab_pool_t *) shm_zone->shm.addr;
+
+    if (shm_zone->shm.exists) {
+        /* Reload / inherited segment: reuse the existing array. */
+        mcf->tarpit_conns = shpool->data;
+        return NGX_OK;
+    }
+
+    conns = ngx_slab_alloc(shpool, sizeof(ngx_atomic_t) * NGX_MAX_PROCESSES);
+    if (conns == NULL) {
+        return NGX_ERROR;
+    }
+
+    ngx_memzero((void *) conns, sizeof(ngx_atomic_t) * NGX_MAX_PROCESSES);
+
+    shpool->data      = (void *) conns;
+    mcf->tarpit_conns = conns;
+
+    return NGX_OK;
+}
+
+/* -------------------------------------------------------------------------
+ * init_process: zero this worker's tarpit sub-counter slot.
+ * ---------------------------------------------------------------------- */
+
+static ngx_int_t
+ngx_sentinel_init_process(ngx_cycle_t *cycle)
+{
+    return sentinel_tarpit_init_process(cycle);
 }
