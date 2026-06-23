@@ -336,7 +336,12 @@ main(void)
     ASSERT_EQ("crowdsec captcha w=200 -> 80",
               sentinel_score_compute(&inp, &lcf), 80);
 
-    /* known_good_ua short-circuit STILL wins over a crowdsec ban. */
+    /*
+     * SECURITY: an UNVERIFIED known_good_ua (UA substring only, spoofable)
+     * must NOT nullify a CrowdSec ban. The good-UA short-circuit is gated on
+     * !crowdsec_hit, so with a ban present the score falls through to the
+     * weighted sum and the ban weight (default 100) still applies.
+     */
     lcf = make_lcf(NGX_SENTINEL_DEFAULT_W_ERRRATE,
                    NGX_SENTINEL_DEFAULT_W_BLOCKED,
                    NGX_SENTINEL_DEFAULT_W_SCANNER,
@@ -344,7 +349,14 @@ main(void)
     inp = make_inputs(0, 0, 0, 0, 1);   /* known_good_ua = 1 */
     inp.crowdsec_hit = 1;
     inp.crowdsec_action = NGX_SENTINEL_CS_BAN;
-    ASSERT_EQ("known_good_ua beats crowdsec ban -> 0",
+    ASSERT_EQ("spoofed good-UA does NOT nullify crowdsec ban",
+              sentinel_score_compute(&inp, &lcf),
+              NGX_SENTINEL_DEFAULT_W_CROWDSEC);
+
+    /* But with NO crowdsec hit, a good-UA still short-circuits the in-module
+     * heuristics to 0 (the allowlist still works for genuine crawlers). */
+    inp = make_inputs(64, 1, 1, 1, 1);  /* every heuristic, good-UA, no ban */
+    ASSERT_EQ("good-UA still short-circuits heuristics when no ban",
               sentinel_score_compute(&inp, &lcf), 0);
 
     /* crowdsec hit but weight 0 -> no contribution. */
