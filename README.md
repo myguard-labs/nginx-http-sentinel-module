@@ -249,16 +249,24 @@ request ──► [sentinel] ─► score = w1·crowdsec(ip)        (Phase 3, ou
 
 ## See also
 
-- Sibling own-modules: `nginx-autocert-module`, `nginx-error-abuse-module`
-  (error-rate + CI-harness source — **sentinel absorbs its logic; standalone
-  deprecated later**), `nginx-strip-filter-module`, `nginx-cache-turbo-module`,
-  `nginx-label-autoconf-module`.
-- Ships in the deb.myguard.nl nginx/angie build (`/opt/packages`).
+- Sibling own-modules (GitHub):
+  - [nginx-error-abuse-module](https://github.com/eilandert/nginx-error-abuse-module)
+    — error-rate + CI-harness source; **sentinel absorbs its logic, standalone
+    deprecated later**
+  - [nginx-autocert-module](https://github.com/eilandert/nginx-autocert-module)
+  - [nginx-strip-filter-module](https://github.com/eilandert/nginx-strip-filter-module)
+  - [nginx-cache-turbo-module](https://github.com/eilandert/nginx-cache-turbo-module)
+  - [nginx-label-autoconf-module](https://github.com/eilandert/nginx-label-autoconf-module)
+- Pitch / design overview:
+  [deb.myguard.nl pitch page](https://deb.myguard.nl/pitch-ngx_http_sentinel-unified-client-reputation-tarpit-module/).
+- Ships in the deb.myguard.nl nginx/angie build (`/opt/packages`):
+  [nginx-modules stack](https://deb.myguard.nl/nginx-modules/) ·
+  [angie-modules-optimized-extended stack](https://deb.myguard.nl/angie-modules-optimized-extended/).
 
 ## Development
 
-- Work on `dev`; feature branches `feat/<phase>` → PR to **`dev`** (local CI only,
-  no remote CI). `master` PRs are unsquashed + remote-CI, opened on request only.
+- Per-item feature branch off `master` → PR to **`master`** → **remote CI green**
+  → squash-merge. (No `dev` branch — the old dev/local-CI model is retired.)
 - Build/test standalone: `bash tools/ci-build.sh`. valgrind + fuzz run manually +
   monthly (remote workflow) and weekly (local cron).
 
