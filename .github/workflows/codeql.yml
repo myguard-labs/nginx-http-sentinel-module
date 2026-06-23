@@ -58,26 +58,35 @@ jobs:
       - name: Build traced source
         run: bash tools/ci-build.sh nginx "$NGINX_VERSION" module
 
+      # This is a PRIVATE repo without GitHub Advanced Security. The
+      # codeql-action always contacts the code-scanning / workflow-runs API
+      # (for SARIF upload and its own status report), which returns 403
+      # "Resource not accessible by integration" and fails the step even with
+      # upload: never. The analysis itself is clean and the SARIF IS written to
+      # disk before that 403, so we tolerate the action's failure here
+      # (continue-on-error) and gate on the SARIF in the next step instead.
+      # To restore the Security-tab dashboard, enable GHAS/code scanning in
+      # repo settings, drop continue-on-error, and set upload: always.
       - name: Analyze
         uses: github/codeql-action/analyze@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4
+        continue-on-error: true
         with:
           category: /language:c-cpp
-          # This is a PRIVATE repo without GitHub Advanced Security, so the
-          # code-scanning SARIF API returns 403 "Resource not accessible by
-          # integration" and the job fails on upload even though the analysis
-          # itself is clean. Run the queries but write SARIF to disk instead of
-          # uploading; the job still fails if a query reports a problem.
-          # To restore the Security-tab dashboard, enable GHAS/code scanning in
-          # repo settings and flip this back to the default (upload: always).
           upload: never
           output: sarif-results
           upload-database: false
 
       - name: Fail on CodeQL findings
         run: |
-          # We skip SARIF upload (private repo, no GHAS), so reinstate a gate:
-          # fail if any .sarif under sarif-results/ contains a result.
+          # The upload is skipped (private repo, no GHAS) and the analyze step
+          # is allowed to fail on its API 403, so this is the real gate: fail
+          # if the exported SARIF is missing (analysis did not run) or contains
+          # any result.
           shopt -s nullglob
+          if [ -z "$(echo sarif-results/*.sarif)" ]; then
+            echo "::error::no SARIF produced — CodeQL analysis did not complete"
+            exit 1
+          fi
           total=0
           for f in sarif-results/*.sarif; do
             n=$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(sum(len(r.get("results",[])) for r in d.get("runs",[])))' "$f")
