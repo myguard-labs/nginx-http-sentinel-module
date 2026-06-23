@@ -54,6 +54,7 @@
 #define NGX_SENTINEL_DEFAULT_W_SCANNER 50    /* scanner-path prefix hit         */
 #define NGX_SENTINEL_DEFAULT_W_BOT     30    /* heuristic bot user-agent        */
 #define NGX_SENTINEL_DEFAULT_W_HEADER  25    /* request-header anomaly          */
+#define NGX_SENTINEL_DEFAULT_W_HONEYPOT 90   /* decoy-URL (honeypot) hit        */
 
 /* Hard ceiling for the computed score (overflow/abuse guard). */
 #define NGX_SENTINEL_SCORE_MAX         100000
@@ -191,6 +192,9 @@ typedef struct {
     /* Header-anomaly: suspicious/malformed request headers */
     ngx_flag_t  header_anomaly;
 
+    /* Honeypot: request URI matched a decoy-path prefix */
+    ngx_flag_t  honeypot;
+
     /* CrowdSec: IP present + unexpired in the crowdsec ban table */
     ngx_flag_t  crowdsec_hit;
     u_char      crowdsec_action;   /* NGX_SENTINEL_CS_* — verdict/score tiering */
@@ -234,6 +238,7 @@ typedef struct {
     ngx_int_t  scanner;   /* added once if scanner_path    */
     ngx_int_t  bot;       /* added once if bot_ua          */
     ngx_int_t  header;    /* added once if header_anomaly  */
+    ngx_int_t  honeypot;  /* added once if honeypot        */
     ngx_int_t  crowdsec;  /* base weight for a crowdsec ban hit (tiered) */
 } ngx_sentinel_weights_t;
 
@@ -263,6 +268,10 @@ typedef struct {
     ngx_int_t                cs_default_ttl;      /* TTL for expiry==0 lines     */
     ngx_int_t                cs_stale_after;      /* stale threshold + LRU age   */
     size_t                   cs_max_bytes;        /* feed size cap (bytes)       */
+
+    /* Honeypot: decoy URL path prefixes (empty = signal off) */
+    ngx_array_t              decoy_paths;         /* ngx_str_t[] honeypot decoy
+                                                   * path prefixes (empty = signal off) */
 
     /* Phase 2 — tarpit parameters */
     ngx_int_t                tarpit_max_conns;    /* global cap across workers      */
@@ -343,6 +352,18 @@ void sentinel_botua_signal(ngx_http_request_t *r,
  */
 void sentinel_header_signal(ngx_http_request_t *r,
     ngx_sentinel_inputs_t *inputs);
+
+/* -------------------------------------------------------------------------
+ * Honeypot API (sentinel_honeypot.c)
+ * ---------------------------------------------------------------------- */
+
+/*
+ * sentinel_honeypot_signal — set inputs->honeypot = 1 if r->uri matches
+ * any prefix in lcf->decoy_paths (case-sensitive, no regex, no malloc).
+ * Fail-open: NULL r / NULL lcf / empty decoy_paths → honeypot = 0.
+ */
+void sentinel_honeypot_signal(ngx_http_request_t *r,
+    ngx_sentinel_loc_conf_t *lcf, ngx_sentinel_inputs_t *inputs);
 
 /* -------------------------------------------------------------------------
  * Score API (sentinel_score.c)

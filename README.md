@@ -49,6 +49,40 @@ non-negative integer.
 | `sentinel_weight_scanner N;` | `50` | Added once when the request URI matches a known scanner path prefix. |
 | `sentinel_weight_bot N;` | `30` | Added once when the User-Agent header matches a heuristic bot-UA pattern. |
 | `sentinel_weight_header N;` | `25` | Added once when a request-header anomaly is detected (HTTP/1.1 without Host, Content-Length + Transfer-Encoding both present, duplicate Host, or neither Accept nor User-Agent). |
+| `sentinel_weight_honeypot N;` | `90` | Added once when the request URI matches a configured decoy-path prefix (see `sentinel_honeypot`). |
+
+### Honeypot (location / server / http context)
+
+Operator-defined decoy URL paths that no legitimate client should ever request.
+A prefix match against the request URI sets the `$sentinel_honeypot` variable to
+`1` and adds `sentinel_weight_honeypot` (default 90) to the score. Match is
+**case-sensitive** (URL paths are case-sensitive) and **prefix**: `/trap` matches
+`/trap`, `/trap/`, `/trap?foo=1`, etc. No regex, no malloc in the request path;
+bounded by the array of declared prefixes.
+
+| Directive | Default | Description |
+|---|---|---|
+| `sentinel_honeypot /path [/path2 ...];` | — | One or more decoy path prefixes. Takes one or more arguments (space-separated); can be repeated across location/server/http levels (child inherits parent if not overridden). |
+| `sentinel_weight_honeypot N;` | `90` | Score contribution of a decoy-path hit. Higher than `header_anomaly` (25) and `bot_ua` (30) since a decoy hit is near-certain evidence of malicious probing; lower than `crowdsec_ban` (100). |
+
+**Variable:** `$sentinel_honeypot` — `1` if the current request URI matched a
+decoy prefix, `0` otherwise.
+
+**Example:**
+
+```nginx
+http {
+    server {
+        sentinel_honeypot /wp-login.php /.env /admin /actuator;
+
+        location / {
+            sentinel on;
+            sentinel_mode enforce;
+            sentinel_threshold challenge=30 tarpit=60 block=80;
+        }
+    }
+}
+```
 
 ### Tarpit (location context)
 
@@ -101,6 +135,7 @@ score = (sentinel_weight_errrate × errrate_count)
       + (sentinel_weight_scanner × scanner_path)      /* 0 or 1 */
       + (sentinel_weight_bot     × bot_ua)            /* 0 or 1 */
       + (sentinel_weight_header  × header_anomaly)    /* 0 or 1 */
+      + (sentinel_weight_honeypot × honeypot)         /* 0 or 1 */
       + (sentinel_weight_crowdsec × crowdsec_hit × tier) /* ban/captcha/throttle */
 ```
 
