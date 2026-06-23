@@ -58,8 +58,21 @@ sentinel_score_compute(const ngx_sentinel_inputs_t *inputs,
         return 0;
     }
 
-    /* Forward-confirmed search engine: allow, override everything. */
-    if (inputs->known_good_ua) {
+    /*
+     * Search-engine allowlist short-circuit.
+     *
+     * SECURITY: known_good_ua is set by User-Agent SUBSTRING only (see
+     * sentinel_botua.c) — it is NOT forward/reverse-DNS confirmed yet (the
+     * Phase 3 "bot-verifier" is still pending). A `User-Agent: Googlebot`
+     * header is therefore trivially spoofable. We allow it to override the
+     * in-module heuristic signals (errrate/scanner/bot/header), but it MUST
+     * NOT nullify a CrowdSec ban: a deployed CrowdSec feed is the operator
+     * explicitly asserting "this IP is malicious regardless of headers."
+     * Letting a spoofed UA wipe that is an auth-bypass. So: only short-circuit
+     * when there is no CrowdSec hit. (Once a verified-RDNS flag exists, this
+     * gate can relax to `known_good_ua_verified`.)
+     */
+    if (inputs->known_good_ua && !inputs->crowdsec_hit) {
         return 0;
     }
 

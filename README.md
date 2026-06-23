@@ -104,8 +104,13 @@ score = (sentinel_weight_errrate × errrate_count)
       + (sentinel_weight_crowdsec × crowdsec_hit × tier) /* ban/captcha/throttle */
 ```
 
-**Short-circuit:** if the User-Agent is a forward-confirmed search engine
-(`known_good_ua`), the score is forced to 0 regardless of any other signal.
+**Short-circuit:** if the User-Agent matches a known search-engine allowlist
+(`known_good_ua`) **and** there is no CrowdSec hit, the score is forced to 0,
+overriding the in-module heuristics. The match is currently UA-substring only
+(not yet forward/reverse-DNS confirmed), so it is deliberately gated: a CrowdSec
+ban — the operator's explicit "malicious regardless of headers" verdict — is
+never nullified by a spoofable `User-Agent`. Once RDNS verification lands the
+gate can relax to a verified flag.
 
 **Clamp:** the score is capped at `100000` (`NGX_SENTINEL_SCORE_MAX`) to
 prevent integer overflow from pathological weight × count products.

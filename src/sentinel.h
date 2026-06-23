@@ -184,7 +184,9 @@ typedef struct {
 
     /* Bot-UA: heuristic bot-UA signal */
     ngx_flag_t  bot_ua;
-    ngx_flag_t  known_good_ua;     /* forward-confirmed search engine UA */
+    ngx_flag_t  known_good_ua;     /* search-engine UA SUBSTRING only — NOT
+                                    * RDNS-verified yet, spoofable; gated on
+                                    * !crowdsec_hit in sentinel_score_compute */
 
     /* Header-anomaly: suspicious/malformed request headers */
     ngx_flag_t  header_anomaly;
