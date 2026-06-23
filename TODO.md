@@ -21,18 +21,18 @@ Compressed file:line map, no fixes. One agent.
 
 ## Phase 1 — Skeleton + score + decide `PR #1`
 Static data only (ja4 blocklist file + in-module feed). Verdict = allow / 403 / challenge. No tarpit, no live CrowdSec. **All signals in-module.**
-- [ ] `[sonnet]` `config` addon + `src/ngx_http_sentinel_module.c` skeleton
-- [ ] `[sonnet]` PREACCESS handler, conf create/merge, var registration
-- [ ] `[sonnet]` directives: `sentinel`, `sentinel_zone`, `sentinel_ja4_blocklist`, `sentinel_fail`, `sentinel_mode shadow|enforce`, `sentinel_threshold`
-- [ ] `[sonnet]` JA4H compute from headers → `$sentinel_ja4h` (fixed buffers, no malloc) — pure-HTTP, no patch
-- [ ] `[sonnet]` error-rate signal absorbed from error-abuse: port `ngx_http_error_abuse_record` sliding-window circular buffer + status-bitfield match → score input. Add scanner-path static match (.env/.git/wp-login, no regex)
-- [ ] `[sonnet]` UA/bot heuristics: port `ngx_http_user_agent_variable` trie+version-range → score input. (forward-DNS verify deferred to Phase 3 allowlist)
-- [ ] `[sonnet]` shmem ban/score table: rbtree+slab, TTL/LRU bound, locked — copy error-abuse `ngx_http_error_abuse_init_zone` + `rbtree_insert` pattern
-- [ ] `[opus-low]` score combine + action dispatch + fail-open path + shadow mode (score+log, no enforce) (security core)
-- [ ] `[sonnet]` vars `$sentinel_score $sentinel_verdict`
-- [ ] `[sonnet]` CI harness (copy error-abuse): ci-build + test_runtime + valgrind/asan/codeql; test every fn
-- [ ] `[codex]` audit Phase 1
-- [ ] `[opus-low]` fix findings → PR #1 → CI green → merge
+- [x] `[sonnet]` `config` addon + `src/ngx_http_sentinel_module.c` skeleton
+- [x] `[sonnet]` PREACCESS handler, conf create/merge, var registration
+- [x] `[sonnet]` directives: `sentinel`, `sentinel_zone`, `sentinel_ja4_blocklist`, `sentinel_fail`, `sentinel_mode shadow|enforce`, `sentinel_threshold`
+- [x] `[sonnet]` JA4H compute from headers → `$sentinel_ja4h` (fixed buffers, no malloc) — pure-HTTP, no patch
+- [x] `[sonnet]` error-rate signal absorbed from error-abuse: port `ngx_http_error_abuse_record` sliding-window circular buffer + status-bitfield match → score input. Add scanner-path static match (.env/.git/wp-login, no regex)
+- [x] `[sonnet]` UA/bot heuristics: port `ngx_http_user_agent_variable` trie+version-range → score input. (forward-DNS verify deferred to Phase 3 allowlist)
+- [x] `[sonnet]` shmem ban/score table: rbtree+slab, TTL/LRU bound, locked — copy error-abuse `ngx_http_error_abuse_init_zone` + `rbtree_insert` pattern
+- [x] `[opus-low]` score combine + action dispatch + fail-open path + shadow mode (score+log, no enforce) (security core)
+- [x] `[sonnet]` vars `$sentinel_score $sentinel_verdict`
+- [x] `[sonnet]` CI harness (copy error-abuse): ci-build + test_runtime + valgrind/asan/codeql; test every fn
+- [x] `[codex]` audit Phase 1
+- [x] `[opus-low]` fix findings → PR #1 → CI green → merge
 
 ## Phase 2 — Tarpit action `PR #2`
 Highest self-DoS risk → opus owns resource model.
