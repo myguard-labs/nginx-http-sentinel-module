@@ -154,9 +154,12 @@ http {{
 
         # Header-anomaly: shadow mode; a request with neither Accept nor
         # User-Agent must score >= sentinel_weight_header (default 25).
+        # weight_bot=0 isolates the header signal: a missing UA also trips the
+        # bot signal, so without this the delta could come from bot scoring.
         location = /header {{
             sentinel on;
             sentinel_mode shadow;
+            sentinel_weight_bot 0;
             access_log {root}/logs/header.log sentinelvars;
             return 200 "header";
         }}
