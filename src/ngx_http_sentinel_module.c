@@ -959,6 +959,10 @@ ngx_sentinel_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
         ngx_sentinel_zone_t       *zones;
         ngx_uint_t                 i;
 
+        /* Drop any inherited pointer: a name MUST resolve on its own merit,
+         * otherwise an unknown name silently keeps the parent's zone. */
+        conf->vel_zone = NULL;
+
         mcf = ngx_http_conf_get_module_main_conf(cf, ngx_http_sentinel_module);
         zones = mcf->vel_zones.elts;
         for (i = 0; i < mcf->vel_zones.nelts; i++) {

@@ -68,7 +68,8 @@ Each = own small PR. Full catalog + config examples: the pitch page (DESIGN.md l
 - [x] signal: honeypot (operator decoy-path prefix match → w_honeypot 90) — PR #3, merged to dev 2026-06-23
 - [x] signal: velocity (request-rate per identity, reuses errrate shm ring; sentinel_velocity_zone name:size rate=/window=/block=; w_velocity 30) — PR #4, merged to dev 2026-06-23
 - [x] velocity: per-LOCATION vel_zone binding — `sentinel_velocity <zone>;` opt-in dir, auto-bind removed, inherits to nested loc — PR #5, dev 2026-06-23
-- [ ] velocity: edge — name typo in child loc that ALSO inherits a parent binding silently keeps parent zone (vel_zone non-NULL → unknown-zone error not raised). Resolve name before merge_ptr inheritance, or clear vel_zone when own name set
+- [x] velocity: edge — child-loc bad zone name silently inherited parent binding. Fixed: clear vel_zone before name resolution → unknown name now rejected. Runtime T8b covers it — PR #6, dev 2026-06-23
+- [ ] test harness: t/basic.t (Test::Nginx) is non-functional — all tests die with "sentinel directive is not allowed here" (module never load_module'd by harness). Either wire %%TEST_NGINX_LOAD_MODULES%% / main_config load, or drop t/*.t and rely on tools/test_runtime.py (current authority). Coverage currently lives in test_runtime.py + t/test_score.c unit
 - [ ] signals: HTTP/2 frame-order fingerprint; UA↔fingerprint coherence; datacenter/ASN (geoip2)
 - [ ] actions: built-in proof-of-work challenge; throttle (bandwidth-cap); cache-only origin-shield; tarpit maze mode; CrowdSec verdict feedback
 - [ ] ops: per-route policy; allowlist (verified search engines + monitoring); metrics → VTS/statsd/OTel; structured decision log; TTL soft-bans

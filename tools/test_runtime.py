@@ -572,6 +572,78 @@ http {{
     print("  T2.7 bounds-parse: PASS")
 
 
+def test_velocity_unknown_zone_rejected(nginx: "Nginx") -> None:
+    """T8b - sentinel_velocity referencing an undefined zone must be rejected at
+    parse time, and a child location with a bad name must NOT silently inherit a
+    parent's resolved binding (the per-location opt-in edge fix)."""
+    load = f"load_module {nginx.module};\n" if nginx.module else ""
+
+    cases = [
+        # (config body inside http{}, reason)
+        (
+            f"""    sentinel_zone main:1m;
+    sentinel_velocity_zone veltest:1m rate=10 window=5;
+    server {{
+        listen 127.0.0.1:{nginx.port + 1};
+        location = /x {{
+            sentinel on;
+            sentinel_velocity nosuchzone;
+            return 200 "x";
+        }}
+    }}""",
+            "unknown velocity zone name",
+        ),
+        (
+            f"""    sentinel_zone main:1m;
+    sentinel_velocity_zone veltest:1m rate=10 window=5;
+    server {{
+        listen 127.0.0.1:{nginx.port + 1};
+        sentinel_velocity veltest;
+        location = /child {{
+            sentinel on;
+            sentinel_velocity nosuchzone;
+            return 200 "x";
+        }}
+    }}""",
+            "child bad name must not inherit parent binding",
+        ),
+    ]
+
+    with tempfile.TemporaryDirectory(prefix="sentinel-ci-velbad-") as bad_root_s:
+        bad_root = pathlib.Path(bad_root_s)
+        (bad_root / "conf").mkdir(parents=True, exist_ok=True)
+        (bad_root / "logs").mkdir(parents=True, exist_ok=True)
+
+        for body, reason in cases:
+            bad_conf = f"""{load}worker_processes 1;
+pid {bad_root}/nginx-bad.pid;
+error_log {bad_root}/logs/error-bad.log info;
+events {{ worker_connections 64; }}
+http {{
+{body}
+}}
+"""
+            bad_path = bad_root / "conf" / "nginx-velbad.conf"
+            bad_path.write_text(bad_conf, encoding="ascii")
+            result = subprocess.run(
+                [str(nginx.binary), "-p", str(bad_root),
+                 "-c", str(bad_path), "-t"],
+                text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                timeout=20,
+            )
+            if result.returncode == 0:
+                raise AssertionError(
+                    f"T8b: nginx accepted invalid config ({reason}) - "
+                    f"should have rejected it"
+                )
+            if "unknown velocity zone" not in result.stdout:
+                raise AssertionError(
+                    f"T8b: rejected ({reason}) but without the expected "
+                    f"'unknown velocity zone' emerg:\n{result.stdout}"
+                )
+    print("  T8b velocity-unknown-zone-rejected: PASS")
+
+
 def test_shadow_never_tarpits(port: int) -> None:
     """T2.5 - shadow mode: response is immediate/normal; counter stays 0."""
     # A normal fetch with bot UA must succeed quickly (no drip).
@@ -961,6 +1033,9 @@ def main() -> int:
 
             # T2.7 - bounds parsing (uses a temporary bad config, no nginx restart).
             test_tarpit_bounds_parse(nginx2)
+
+            # T8b - velocity unknown-zone rejection + no silent parent inherit.
+            test_velocity_unknown_zone_rejected(nginx2)
 
             # T2.5 - shadow mode never tarpits.
             test_shadow_never_tarpits(args.port + 1)
