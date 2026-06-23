@@ -64,7 +64,8 @@ Only if traffic shows JA4H/H2 evasion. Both need core surface beyond pure HTTP.
 
 ## Roadmap (post-core, incremental — layered on the score-then-act pipeline)
 Each = own small PR. Full catalog + config examples: the pitch page (DESIGN.md links it).
-- [ ] signals: HTTP/2 frame-order fingerprint; UA↔fingerprint coherence; datacenter/ASN (geoip2); velocity; scanner-path; honeypot; header-anomaly
+- [x] signal: header-anomaly (no-Host/CL+TE/dup-Host/no-Accept+UA) — PR #1, merged to dev 2026-06-23
+- [ ] signals: HTTP/2 frame-order fingerprint; UA↔fingerprint coherence; datacenter/ASN (geoip2); velocity; honeypot
 - [ ] actions: built-in proof-of-work challenge; throttle (bandwidth-cap); cache-only origin-shield; tarpit maze mode; CrowdSec verdict feedback
 - [ ] ops: per-route policy; allowlist (verified search engines + monitoring); metrics → VTS/statsd/OTel; structured decision log; TTL soft-bans
 
