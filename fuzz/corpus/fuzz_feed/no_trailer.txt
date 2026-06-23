@@ -1,0 +1,2 @@
+# sentinel-crowdsec-feed v1
+1.2.3.4 ban 9999999999

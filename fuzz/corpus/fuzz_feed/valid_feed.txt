@@ -1,0 +1,5 @@
+# sentinel-crowdsec-feed v1
+# generated 2026-06-01T00:00:00Z count=2
+1.2.3.4 ban 9999999999
+10.0.0.1 captcha 9999999999
+%%EOF 2 b63ad252
