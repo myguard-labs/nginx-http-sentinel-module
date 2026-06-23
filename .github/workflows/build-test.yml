@@ -112,7 +112,12 @@ jobs:
               "$GITHUB_WORKSPACE/src/sentinel_errrate.c" \
               "$GITHUB_WORKSPACE/src/sentinel_botua.c" \
               "$GITHUB_WORKSPACE/src/sentinel_shm.c" \
-              "$GITHUB_WORKSPACE/src/sentinel_score.c"; do
+              "$GITHUB_WORKSPACE/src/sentinel_score.c" \
+              "$GITHUB_WORKSPACE/src/sentinel_feed.c" \
+              "$GITHUB_WORKSPACE/src/sentinel_header.c" \
+              "$GITHUB_WORKSPACE/src/sentinel_honeypot.c" \
+              "$GITHUB_WORKSPACE/src/sentinel_tarpit.c" \
+              "$GITHUB_WORKSPACE/src/sentinel_velocity.c"; do
               "${{ matrix.cc }}" -c -fPIC $cflags \
                 -Wall -Wextra -Wshadow -Wstrict-prototypes \
                 -Wstrict-aliasing -Wunreachable-code -Werror \
