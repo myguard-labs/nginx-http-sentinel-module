@@ -1,0 +1,297 @@
+/*
+ * t/test_score.c — standalone unit tests for sentinel_score_compute() and
+ *                  sentinel_score_to_verdict().
+ *
+ * Build and run (from the repo root):
+ *
+ *   cc -std=c99 -I src -o .build/test_score t/test_score.c && .build/test_score
+ *
+ * This file does NOT link against nginx or OpenSSL.  It provides its own
+ * minimal stubs for the nginx types used by sentinel.h / sentinel_score.c so
+ * the pure-arithmetic score functions can be compiled and tested in isolation.
+ *
+ * The Test::Nginx harness (t/basic.t) is HTTP-based and cannot exercise pure C
+ * functions directly, hence this separate driver.  ci-build.sh calls it via the
+ * "unit" step after the module build.
+ *
+ * Copyright (c) 2026 Eilander — MIT
+ */
+
+#include <stddef.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+/* -------------------------------------------------------------------------
+ * Minimal nginx-type stubs — only what sentinel_score.c uses.
+ * We define all types before pulling in sentinel_score.c, and we
+ * short-circuit sentinel.h's nginx includes by pre-defining its guard.
+ * ---------------------------------------------------------------------- */
+
+typedef unsigned char  u_char;
+typedef intptr_t       ngx_int_t;
+typedef uintptr_t      ngx_uint_t;
+typedef int            ngx_flag_t;
+
+/* ngx_inline: nginx uses `static ngx_inline` at call sites, so the macro
+ * itself must expand to just `inline` (the outer `static` is explicit). */
+#define ngx_inline  inline
+
+/* -------------------------------------------------------------------------
+ * Sentinel constants and types (self-contained copy so we don't need
+ * ngx_config.h / OpenSSL).  These must match sentinel.h exactly.
+ * ---------------------------------------------------------------------- */
+
+#define NGX_SENTINEL_JA4H_HEX_LEN     24
+#define NGX_SENTINEL_SCORE_MAX         100000
+
+#define NGX_SENTINEL_DEFAULT_W_ERRRATE 1
+#define NGX_SENTINEL_DEFAULT_W_BLOCKED 100
+#define NGX_SENTINEL_DEFAULT_W_SCANNER 50
+#define NGX_SENTINEL_DEFAULT_W_BOT     30
+
+#define NGX_SENTINEL_DEFAULT_THRESH_CH 30
+#define NGX_SENTINEL_DEFAULT_THRESH_TP 60
+#define NGX_SENTINEL_DEFAULT_THRESH_BK 80
+
+typedef enum {
+    NGX_SENTINEL_VERDICT_ALLOW     = 0,
+    NGX_SENTINEL_VERDICT_CHALLENGE = 1,
+    NGX_SENTINEL_VERDICT_TARPIT    = 2,
+    NGX_SENTINEL_VERDICT_BLOCK     = 3
+} ngx_sentinel_verdict_e;
+
+typedef struct {
+    u_char      ja4h[NGX_SENTINEL_JA4H_HEX_LEN + 1];
+    ngx_uint_t  errrate_count;
+    ngx_flag_t  errrate_blocked;
+    ngx_flag_t  scanner_path;
+    ngx_flag_t  bot_ua;
+    ngx_flag_t  known_good_ua;
+} ngx_sentinel_inputs_t;
+
+typedef struct {
+    ngx_int_t  challenge;
+    ngx_int_t  tarpit;
+    ngx_int_t  block;
+} ngx_sentinel_threshold_t;
+
+typedef struct {
+    ngx_int_t  errrate;
+    ngx_int_t  blocked;
+    ngx_int_t  scanner;
+    ngx_int_t  bot;
+} ngx_sentinel_weights_t;
+
+/* Minimal loc-conf stub: only weights field is used by sentinel_score.c. */
+typedef struct {
+    ngx_flag_t               enabled;
+    ngx_flag_t               shadow;
+    ngx_flag_t               fail_open;
+    void                    *zone;
+    ngx_sentinel_threshold_t threshold;
+    ngx_sentinel_weights_t   weights;
+} ngx_sentinel_loc_conf_t;
+
+/* -------------------------------------------------------------------------
+ * Pull in the implementation directly (avoids a separate link step).
+ * Pre-define SENTINEL_H so the real sentinel.h (which needs ngx_config.h
+ * and OpenSSL) is skipped — our stubs above provide everything the score
+ * functions actually use.
+ * ---------------------------------------------------------------------- */
+
+#define SENTINEL_H  /* skip real sentinel.h */
+#include "../src/sentinel_score.c"
+
+/* -------------------------------------------------------------------------
+ * Test harness
+ * ---------------------------------------------------------------------- */
+
+static int g_pass = 0;
+static int g_fail = 0;
+
+#define ASSERT_EQ(label, got, expected)                                        \
+    do {                                                                       \
+        if ((got) == (expected)) {                                             \
+            printf("PASS  %s\n", (label));                                     \
+            g_pass++;                                                          \
+        } else {                                                               \
+            printf("FAIL  %s  (got=%ld, expected=%ld)\n",                     \
+                   (label), (long)(got), (long)(expected));                    \
+            g_fail++;                                                          \
+        }                                                                      \
+    } while (0)
+
+/* Build a default loc_conf with canonical default weights + thresholds. */
+static ngx_sentinel_loc_conf_t
+make_lcf(ngx_int_t w_errrate, ngx_int_t w_blocked,
+         ngx_int_t w_scanner, ngx_int_t w_bot)
+{
+    ngx_sentinel_loc_conf_t lcf;
+    memset(&lcf, 0, sizeof(lcf));
+    lcf.weights.errrate  = w_errrate;
+    lcf.weights.blocked  = w_blocked;
+    lcf.weights.scanner  = w_scanner;
+    lcf.weights.bot      = w_bot;
+    lcf.threshold.challenge = NGX_SENTINEL_DEFAULT_THRESH_CH;
+    lcf.threshold.tarpit    = NGX_SENTINEL_DEFAULT_THRESH_TP;
+    lcf.threshold.block     = NGX_SENTINEL_DEFAULT_THRESH_BK;
+    return lcf;
+}
+
+static ngx_sentinel_inputs_t
+make_inputs(ngx_uint_t errrate_count, ngx_flag_t errrate_blocked,
+            ngx_flag_t scanner_path, ngx_flag_t bot_ua,
+            ngx_flag_t known_good_ua)
+{
+    ngx_sentinel_inputs_t inp;
+    memset(&inp, 0, sizeof(inp));
+    inp.errrate_count   = errrate_count;
+    inp.errrate_blocked = errrate_blocked;
+    inp.scanner_path    = scanner_path;
+    inp.bot_ua          = bot_ua;
+    inp.known_good_ua   = known_good_ua;
+    return inp;
+}
+
+int
+main(void)
+{
+    ngx_sentinel_inputs_t    inp;
+    ngx_sentinel_loc_conf_t  lcf;
+    ngx_int_t                score;
+
+    /* ------------------------------------------------------------------
+     * (a) known_good_ua short-circuits to 0 regardless of other signals.
+     * ------------------------------------------------------------------ */
+
+    lcf = make_lcf(NGX_SENTINEL_DEFAULT_W_ERRRATE,
+                   NGX_SENTINEL_DEFAULT_W_BLOCKED,
+                   NGX_SENTINEL_DEFAULT_W_SCANNER,
+                   NGX_SENTINEL_DEFAULT_W_BOT);
+
+    /* All signals active but known_good_ua=1 → must be 0. */
+    inp = make_inputs(64, 1, 1, 1, 1);
+    score = sentinel_score_compute(&inp, &lcf);
+    ASSERT_EQ("known_good_ua short-circuits to 0", score, 0);
+
+    /* known_good_ua=0, signals active → must be non-zero. */
+    inp = make_inputs(1, 0, 0, 0, 0);
+    score = sentinel_score_compute(&inp, &lcf);
+    ASSERT_EQ("no known_good_ua, errrate=1 → non-zero", score != 0, 1);
+
+    /* ------------------------------------------------------------------
+     * (b) Weighted sum is correct for a known input set.
+     *     weights: errrate=2, blocked=10, scanner=5, bot=3
+     *     inputs:  errrate_count=4, blocked=1, scanner=1, bot=1
+     *     expected: 2*4 + 10 + 5 + 3 = 26
+     * ------------------------------------------------------------------ */
+
+    lcf = make_lcf(2, 10, 5, 3);
+    inp = make_inputs(4, 1, 1, 1, 0);
+    score = sentinel_score_compute(&inp, &lcf);
+    ASSERT_EQ("weighted sum 2*4+10+5+3 = 26", score, 26);
+
+    /* Verify each weight in isolation. */
+    lcf = make_lcf(3, 0, 0, 0);
+    inp = make_inputs(5, 0, 0, 0, 0);
+    ASSERT_EQ("errrate only: 3*5 = 15", sentinel_score_compute(&inp, &lcf), 15);
+
+    lcf = make_lcf(0, 7, 0, 0);
+    inp = make_inputs(0, 1, 0, 0, 0);
+    ASSERT_EQ("blocked only: 7", sentinel_score_compute(&inp, &lcf), 7);
+
+    lcf = make_lcf(0, 0, 9, 0);
+    inp = make_inputs(0, 0, 1, 0, 0);
+    ASSERT_EQ("scanner only: 9", sentinel_score_compute(&inp, &lcf), 9);
+
+    lcf = make_lcf(0, 0, 0, 11);
+    inp = make_inputs(0, 0, 0, 1, 0);
+    ASSERT_EQ("bot only: 11", sentinel_score_compute(&inp, &lcf), 11);
+
+    /* No signals → 0. */
+    lcf = make_lcf(NGX_SENTINEL_DEFAULT_W_ERRRATE,
+                   NGX_SENTINEL_DEFAULT_W_BLOCKED,
+                   NGX_SENTINEL_DEFAULT_W_SCANNER,
+                   NGX_SENTINEL_DEFAULT_W_BOT);
+    inp = make_inputs(0, 0, 0, 0, 0);
+    ASSERT_EQ("no signals → 0", sentinel_score_compute(&inp, &lcf), 0);
+
+    /* ------------------------------------------------------------------
+     * (c) Clamp: score cannot exceed NGX_SENTINEL_SCORE_MAX (100000).
+     * ------------------------------------------------------------------ */
+
+    /* weight_blocked=100000, blocked=1 → exactly at cap. */
+    lcf = make_lcf(0, NGX_SENTINEL_SCORE_MAX, 0, 0);
+    inp = make_inputs(0, 1, 0, 0, 0);
+    ASSERT_EQ("clamp: single-weight at cap", sentinel_score_compute(&inp, &lcf),
+              NGX_SENTINEL_SCORE_MAX);
+
+    /* weight_blocked=100000, scanner=50 → sum would overflow; must clamp. */
+    lcf = make_lcf(0, NGX_SENTINEL_SCORE_MAX, 50, 0);
+    inp = make_inputs(0, 1, 1, 0, 0);
+    ASSERT_EQ("clamp: sum beyond cap stays at cap",
+              sentinel_score_compute(&inp, &lcf), NGX_SENTINEL_SCORE_MAX);
+
+    /* large errrate_count * large weight → clamp. */
+    lcf = make_lcf(NGX_SENTINEL_SCORE_MAX, 0, 0, 0);
+    inp = make_inputs(100, 0, 0, 0, 0);
+    ASSERT_EQ("clamp: huge errrate product",
+              sentinel_score_compute(&inp, &lcf), NGX_SENTINEL_SCORE_MAX);
+
+    /* ------------------------------------------------------------------
+     * (d) NULL inputs / lcf → 0 (fail-open).
+     * ------------------------------------------------------------------ */
+
+    lcf = make_lcf(1, 100, 50, 30);
+    ASSERT_EQ("NULL inputs → 0", sentinel_score_compute(NULL, &lcf), 0);
+
+    inp = make_inputs(10, 1, 1, 1, 0);
+    ASSERT_EQ("NULL lcf → 0", sentinel_score_compute(&inp, NULL), 0);
+
+    ASSERT_EQ("NULL both → 0", sentinel_score_compute(NULL, NULL), 0);
+
+    /* ------------------------------------------------------------------
+     * (e) Verdict mapping: block > tarpit > challenge > allow at boundaries.
+     *     Default thresholds: challenge=30, tarpit=60, block=80.
+     * ------------------------------------------------------------------ */
+
+    ngx_sentinel_threshold_t thr = {
+        .challenge = NGX_SENTINEL_DEFAULT_THRESH_CH,
+        .tarpit    = NGX_SENTINEL_DEFAULT_THRESH_TP,
+        .block     = NGX_SENTINEL_DEFAULT_THRESH_BK,
+    };
+
+    ASSERT_EQ("verdict 0 → allow",
+              sentinel_score_to_verdict(0, &thr),
+              NGX_SENTINEL_VERDICT_ALLOW);
+    ASSERT_EQ("verdict 29 → allow",
+              sentinel_score_to_verdict(29, &thr),
+              NGX_SENTINEL_VERDICT_ALLOW);
+    ASSERT_EQ("verdict 30 → challenge",
+              sentinel_score_to_verdict(30, &thr),
+              NGX_SENTINEL_VERDICT_CHALLENGE);
+    ASSERT_EQ("verdict 59 → challenge",
+              sentinel_score_to_verdict(59, &thr),
+              NGX_SENTINEL_VERDICT_CHALLENGE);
+    ASSERT_EQ("verdict 60 → tarpit",
+              sentinel_score_to_verdict(60, &thr),
+              NGX_SENTINEL_VERDICT_TARPIT);
+    ASSERT_EQ("verdict 79 → tarpit",
+              sentinel_score_to_verdict(79, &thr),
+              NGX_SENTINEL_VERDICT_TARPIT);
+    ASSERT_EQ("verdict 80 → block",
+              sentinel_score_to_verdict(80, &thr),
+              NGX_SENTINEL_VERDICT_BLOCK);
+    ASSERT_EQ("verdict 100000 → block",
+              sentinel_score_to_verdict(NGX_SENTINEL_SCORE_MAX, &thr),
+              NGX_SENTINEL_VERDICT_BLOCK);
+
+    /* ------------------------------------------------------------------
+     * Summary
+     * ------------------------------------------------------------------ */
+
+    printf("\n%d passed, %d failed\n", g_pass, g_fail);
+    return g_fail ? 1 : 0;
+}

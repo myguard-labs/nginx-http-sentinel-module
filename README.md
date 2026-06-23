@@ -25,6 +25,56 @@ is **deprecated later** once sentinel's native error-rate signal covers it.
 > is in [TODO.md](TODO.md); the locked design decisions and safety rules are in
 > [DESIGN.md](DESIGN.md). Read those before writing code.
 
+## Directives
+
+### Core (location context)
+
+| Directive | Default | Description |
+|---|---|---|
+| `sentinel on\|off;` | `off` | Enable the module for this location. |
+| `sentinel_mode enforce\|shadow;` | `enforce` | `shadow` scores and sets variables but never blocks. |
+| `sentinel_fail open\|closed;` | `open` | On zone/lookup error: `open` allows, `closed` blocks. |
+| `sentinel_zone name:size;` | — | Shared-memory zone (http context). |
+| `sentinel_threshold challenge=N tarpit=M block=K;` | `30/60/80` | Score thresholds for each verdict (see Scoring below). |
+
+### Score weights (location context)
+
+These tune how much each signal contributes to the final score. All accept a
+non-negative integer.
+
+| Directive | Default | Signal it weights |
+|---|---|---|
+| `sentinel_weight_errrate N;` | `1` | Multiplied by the number of errors recorded in the burst window for this identity. A client with 20 errors in the window contributes `20 × N` to the score. |
+| `sentinel_weight_blocked N;` | `100` | Added once (flat) when the identity is already in a blocked state in the shared-memory zone. |
+| `sentinel_weight_scanner N;` | `50` | Added once when the request URI matches a known scanner path prefix. |
+| `sentinel_weight_bot N;` | `30` | Added once when the User-Agent header matches a heuristic bot-UA pattern. |
+
+### Scoring model
+
+```
+score = (sentinel_weight_errrate × errrate_count)
+      + (sentinel_weight_blocked × errrate_blocked)   /* 0 or 1 */
+      + (sentinel_weight_scanner × scanner_path)      /* 0 or 1 */
+      + (sentinel_weight_bot     × bot_ua)            /* 0 or 1 */
+```
+
+**Short-circuit:** if the User-Agent is a forward-confirmed search engine
+(`known_good_ua`), the score is forced to 0 regardless of any other signal.
+
+**Clamp:** the score is capped at `100000` (`NGX_SENTINEL_SCORE_MAX`) to
+prevent integer overflow from pathological weight × count products.
+
+**Verdict mapping** (using `sentinel_threshold` defaults):
+
+| Score range | Verdict |
+|---|---|
+| ≥ 80 | block (403) |
+| 60 – 79 | tarpit (garbage drip) |
+| 30 – 59 | challenge (PoW / js-challenge) |
+| 0 – 29 | allow |
+
+---
+
 ## Why one module
 
 All three are the same pipeline at one decision point (`PREACCESS`):

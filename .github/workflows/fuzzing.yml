@@ -1,0 +1,59 @@
+name: Fuzzing
+
+# Coverage-guided fuzzing of sentinel input parsers.
+# Monthly discovery run + manual dispatch only — not on every PR.
+
+on:
+  schedule:
+    # Monthly, 1st @ 03:41 UTC.
+    - cron: "41 3 1 * *"
+  workflow_dispatch:
+    inputs:
+      duration:
+        description: "Fuzz duration in seconds"
+        required: false
+        default: "900"
+
+concurrency:
+  group: fuzz-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    name: Sentinel input fuzz
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+
+      - name: Install clang + libFuzzer
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang
+
+      - name: Select fuzz duration
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "FUZZ_SECS=${{ github.event.inputs.duration }}" >> "$GITHUB_ENV"
+          else
+            echo "FUZZ_SECS=900" >> "$GITHUB_ENV"
+          fi
+
+      - name: Build fuzz targets (placeholder)
+        run: |
+          # TODO Phase 1b: add fuzz/ directory with JA4H canonical-string fuzzer
+          # and botua UA-string fuzzer (attacker-controlled inputs).
+          echo "No fuzz targets yet — Phase 1 placeholder"
+
+      - name: Upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: fuzz-crashes
+          path: |
+            ${{ github.workspace }}/fuzz/crash-*
+          retention-days: 30
