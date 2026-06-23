@@ -35,7 +35,7 @@ Static data only (ja4 blocklist file + in-module feed). Verdict = allow / 403 / 
 - [x] `[opus-low]` fix findings → PR #1 → CI green → merge
 
 ## Phase 1b — wire errrate recording (carryover from Phase 1)
-- [ ] `[sonnet]` `sentinel_shm_errrate_record` exists + tested but NOT called: add
+- [x] `[sonnet]` `sentinel_shm_errrate_record` exists + tested but NOT called: add
       response-status output hook (header/log-phase) to feed the sliding counter,
       so error-rate signal is live (Phase 1 only reads, never records yet)
 
