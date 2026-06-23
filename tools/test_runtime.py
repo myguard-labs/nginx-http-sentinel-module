@@ -152,6 +152,15 @@ http {{
             return 200 "probe";
         }}
 
+        # Header-anomaly: shadow mode; a request with neither Accept nor
+        # User-Agent must score >= sentinel_weight_header (default 25).
+        location = /header {{
+            sentinel on;
+            sentinel_mode shadow;
+            access_log {root}/logs/header.log sentinelvars;
+            return 200 "header";
+        }}
+
         # Phase 2 - tarpit: enforce mode, forced TARPIT via high bot score.
         # sqlmap UA triggers bot signal; errrate deliberately not needed here
         # since bot weight alone should be >= tarpit threshold (default 60).
@@ -334,6 +343,24 @@ def open_slow_connection(port: int, path: str,
     )
     s.sendall(req.encode())
     return s
+
+
+def fetch_bare(port: int, path: str) -> int:
+    """Send an HTTP/1.1 request with neither User-Agent nor Accept (the
+    header-anomaly case), read the status, close. urllib always injects a
+    default User-Agent, so this must be issued over a raw socket."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.connect(("127.0.0.1", port))
+    req = (
+        f"GET {path} HTTP/1.1\r\n"
+        f"Host: 127.0.0.1:{port}\r\n"
+        f"Connection: close\r\n"
+        f"\r\n"
+    )
+    s.sendall(req.encode())
+    status, _ = read_response_head(s)
+    s.close()
+    return status
 
 
 def read_response_head(s: socket.socket, timeout: float = 5.0) -> tuple[int, bytes]:
@@ -782,6 +809,35 @@ def main() -> int:
                     f"errrate recording: expected score > 0 after {N_ERRORS} "
                     f"404s, got score={probe_score} "
                     f"(log handler may not be recording error events)")
+
+            # TEST 6: header-anomaly - a request with neither User-Agent nor
+            # Accept must score >= sentinel_weight_header (default 25), while a
+            # normal request (UA + Accept) scores 0 on the same location.
+            if fetch_bare(args.port, "/header") != 200:
+                raise AssertionError("/header (bare): expected 200 in shadow mode")
+            fetch(args.port, "/header",
+                  extra_headers={"Accept": "text/html"})  # clean control
+            time.sleep(0.3)
+
+            header_log = root / "server" / "logs" / "header.log"
+            if not header_log.exists():
+                raise AssertionError("header.log not written")
+            hlines = [ln.split() for ln in
+                      header_log.read_text(encoding="utf-8").splitlines()
+                      if ln.strip()]
+            if len(hlines) < 2:
+                raise AssertionError("header.log: expected >=2 lines")
+            # Both requests share the 127.0.0.1 identity, so any errrate carried
+            # over from TEST 5 is present in BOTH scores. The header-anomaly
+            # contribution is therefore the DELTA: the bare request must exceed
+            # the clean control by at least sentinel_weight_header (25).
+            anomalous_score = int(hlines[0][1])
+            clean_score = int(hlines[-1][1])
+            if anomalous_score - clean_score < 25:
+                raise AssertionError(
+                    f"header-anomaly: bare request must exceed clean control by "
+                    f">= 25 (weight_header); got bare={anomalous_score} "
+                    f"clean={clean_score}")
 
             nginx.stop()
             nginx.assert_clean_logs()

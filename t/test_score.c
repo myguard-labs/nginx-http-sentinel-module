@@ -50,6 +50,7 @@ typedef int            ngx_flag_t;
 #define NGX_SENTINEL_DEFAULT_W_BLOCKED 100
 #define NGX_SENTINEL_DEFAULT_W_SCANNER 50
 #define NGX_SENTINEL_DEFAULT_W_BOT     30
+#define NGX_SENTINEL_DEFAULT_W_HEADER  25
 #define NGX_SENTINEL_DEFAULT_W_CROWDSEC 100
 
 #define NGX_SENTINEL_CS_NONE      0
@@ -75,6 +76,7 @@ typedef struct {
     ngx_flag_t  scanner_path;
     ngx_flag_t  bot_ua;
     ngx_flag_t  known_good_ua;
+    ngx_flag_t  header_anomaly;
     ngx_flag_t  crowdsec_hit;
     u_char      crowdsec_action;
 } ngx_sentinel_inputs_t;
@@ -90,6 +92,7 @@ typedef struct {
     ngx_int_t  blocked;
     ngx_int_t  scanner;
     ngx_int_t  bot;
+    ngx_int_t  header;
     ngx_int_t  crowdsec;
 } ngx_sentinel_weights_t;
 
@@ -219,6 +222,21 @@ main(void)
     lcf = make_lcf(0, 0, 0, 11);
     inp = make_inputs(0, 0, 0, 1, 0);
     ASSERT_EQ("bot only: 11", sentinel_score_compute(&inp, &lcf), 11);
+
+    /* header_anomaly only: weight 25 added once. */
+    lcf = make_lcf(0, 0, 0, 0);
+    lcf.weights.header = NGX_SENTINEL_DEFAULT_W_HEADER;
+    inp = make_inputs(0, 0, 0, 0, 0);
+    inp.header_anomaly = 1;
+    ASSERT_EQ("header only: 25", sentinel_score_compute(&inp, &lcf), 25);
+
+    /* known_good_ua short-circuits header_anomaly to 0. */
+    lcf = make_lcf(0, 0, 0, 0);
+    lcf.weights.header = NGX_SENTINEL_DEFAULT_W_HEADER;
+    inp = make_inputs(0, 0, 0, 0, 1);
+    inp.header_anomaly = 1;
+    ASSERT_EQ("known_good_ua overrides header_anomaly",
+              sentinel_score_compute(&inp, &lcf), 0);
 
     /* No signals → 0. */
     lcf = make_lcf(NGX_SENTINEL_DEFAULT_W_ERRRATE,

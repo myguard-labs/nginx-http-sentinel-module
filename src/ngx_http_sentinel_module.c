@@ -63,6 +63,8 @@ static ngx_int_t ngx_sentinel_var_verdict(ngx_http_request_t *r,
     ngx_http_variable_value_t *v, uintptr_t data);
 static ngx_int_t ngx_sentinel_var_ja4h(ngx_http_request_t *r,
     ngx_http_variable_value_t *v, uintptr_t data);
+static ngx_int_t ngx_sentinel_var_header(ngx_http_request_t *r,
+    ngx_http_variable_value_t *v, uintptr_t data);
 
 static ngx_sentinel_ctx_t *ngx_sentinel_get_ctx(ngx_http_request_t *r);
 
@@ -142,6 +144,14 @@ static ngx_command_t ngx_sentinel_commands[] = {
       ngx_conf_set_num_slot,
       NGX_HTTP_LOC_CONF_OFFSET,
       offsetof(ngx_sentinel_loc_conf_t, weights.bot),
+      NULL },
+
+    /* sentinel_weight_header N; — request-header anomaly */
+    { ngx_string("sentinel_weight_header"),
+      NGX_HTTP_LOC_CONF | NGX_CONF_TAKE1,
+      ngx_conf_set_num_slot,
+      NGX_HTTP_LOC_CONF_OFFSET,
+      offsetof(ngx_sentinel_loc_conf_t, weights.header),
       NULL },
 
     /* ---- Phase 2: tarpit directives ---- */
@@ -291,6 +301,9 @@ static ngx_http_variable_t ngx_sentinel_vars[] = {
     { ngx_string("sentinel_ja4h"),    NULL,
       ngx_sentinel_var_ja4h,    0, NGX_HTTP_VAR_NOCACHEABLE, 0 },
 
+    { ngx_string("sentinel_header_anomaly"), NULL,
+      ngx_sentinel_var_header,  0, NGX_HTTP_VAR_NOCACHEABLE, 0 },
+
     { ngx_null_string, NULL, NULL, 0, 0, 0 }
 };
 
@@ -338,10 +351,11 @@ ngx_sentinel_get_ctx(ngx_http_request_t *r)
 
     lcf = ngx_http_get_module_loc_conf(r, ngx_http_sentinel_module);
 
-    /* Gather all three signals. */
+    /* Gather all signals. */
     sentinel_ja4h_compute(r, ctx->inputs.ja4h);
     sentinel_errrate_signal(r, lcf, &ctx->inputs);
     sentinel_botua_signal(r, &ctx->inputs);
+    sentinel_header_signal(r, &ctx->inputs);
     sentinel_crowdsec_signal(r, lcf, &ctx->inputs);
 
     /* Score + verdict (stub returns 0 -> always allow). */
@@ -435,6 +449,27 @@ ngx_sentinel_var_ja4h(ngx_http_request_t *r, ngx_http_variable_value_t *v,
     return NGX_OK;
 }
 
+static ngx_int_t
+ngx_sentinel_var_header(ngx_http_request_t *r, ngx_http_variable_value_t *v,
+    uintptr_t data)
+{
+    ngx_sentinel_ctx_t  *ctx;
+
+    ctx = ngx_sentinel_get_ctx(r);
+    if (ctx == NULL) {
+        v->not_found = 1;
+        return NGX_OK;
+    }
+
+    v->len  = 1;
+    v->data = (u_char *) (ctx->inputs.header_anomaly ? "1" : "0");
+    v->valid  = 1;
+    v->not_found   = 0;
+    v->no_cacheable = 0;
+
+    return NGX_OK;
+}
+
 /* -------------------------------------------------------------------------
  * PREACCESS handler
  * ---------------------------------------------------------------------- */
@@ -463,7 +498,7 @@ ngx_sentinel_preaccess_handler(ngx_http_request_t *r)
     /* 3. Log score/verdict/ja4h at info level (always, in both modes). */
     ngx_log_error(NGX_LOG_INFO, r->connection->log, 0,
                   "sentinel: score=%i verdict=%s ja4h=%s "
-                  "shadow=%i errrate=%ui bot=%i scanner=%i "
+                  "shadow=%i errrate=%ui bot=%i scanner=%i header=%i "
                   "crowdsec=%i cs_action=%ui",
                   ctx->score,
                   verdict_strings[ctx->verdict],
@@ -472,6 +507,7 @@ ngx_sentinel_preaccess_handler(ngx_http_request_t *r)
                   ctx->inputs.errrate_count,
                   (ngx_int_t) ctx->inputs.bot_ua,
                   (ngx_int_t) ctx->inputs.scanner_path,
+                  (ngx_int_t) ctx->inputs.header_anomaly,
                   (ngx_int_t) ctx->inputs.crowdsec_hit,
                   (ngx_uint_t) ctx->inputs.crowdsec_action);
 
@@ -721,6 +757,7 @@ ngx_sentinel_create_loc_conf(ngx_conf_t *cf)
     lcf->weights.blocked = NGX_CONF_UNSET;
     lcf->weights.scanner = NGX_CONF_UNSET;
     lcf->weights.bot     = NGX_CONF_UNSET;
+    lcf->weights.header  = NGX_CONF_UNSET;
     lcf->weights.crowdsec = NGX_CONF_UNSET;
 
     lcf->cs_zone         = NGX_CONF_UNSET_PTR;
@@ -769,6 +806,9 @@ ngx_sentinel_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
     ngx_conf_merge_value(conf->weights.bot,
                          prev->weights.bot,
                          NGX_SENTINEL_DEFAULT_W_BOT);
+    ngx_conf_merge_value(conf->weights.header,
+                         prev->weights.header,
+                         NGX_SENTINEL_DEFAULT_W_HEADER);
     ngx_conf_merge_value(conf->weights.crowdsec,
                          prev->weights.crowdsec,
                          NGX_SENTINEL_DEFAULT_W_CROWDSEC);

@@ -48,6 +48,7 @@ non-negative integer.
 | `sentinel_weight_blocked N;` | `100` | Added once (flat) when the identity is already in a blocked state in the shared-memory zone. |
 | `sentinel_weight_scanner N;` | `50` | Added once when the request URI matches a known scanner path prefix. |
 | `sentinel_weight_bot N;` | `30` | Added once when the User-Agent header matches a heuristic bot-UA pattern. |
+| `sentinel_weight_header N;` | `25` | Added once when a request-header anomaly is detected (HTTP/1.1 without Host, Content-Length + Transfer-Encoding both present, duplicate Host, or neither Accept nor User-Agent). |
 
 ### Tarpit (location context)
 
@@ -99,6 +100,7 @@ score = (sentinel_weight_errrate × errrate_count)
       + (sentinel_weight_blocked × errrate_blocked)   /* 0 or 1 */
       + (sentinel_weight_scanner × scanner_path)      /* 0 or 1 */
       + (sentinel_weight_bot     × bot_ua)            /* 0 or 1 */
+      + (sentinel_weight_header  × header_anomaly)    /* 0 or 1 */
       + (sentinel_weight_crowdsec × crowdsec_hit × tier) /* ban/captcha/throttle */
 ```
 
@@ -128,6 +130,7 @@ request ──► [sentinel] ─► score = w1·crowdsec(ip)        (Phase 3, ou
                                  + w2·bot/UA signal       (in-module)
                                  + w3·error-burst          (in-module, absorbed)
                                  + w4·scanner-path         (in-module)
+                                 + w5·header-anomaly        (in-module)
                                  + JA4H(headers)           (in-module)
                                  [+ JA4 TLS  — Phase 4, needs core patch]
             verdict:  low → allow

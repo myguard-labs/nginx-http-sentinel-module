@@ -53,6 +53,7 @@
 #define NGX_SENTINEL_DEFAULT_W_BLOCKED 100   /* identity already blocked        */
 #define NGX_SENTINEL_DEFAULT_W_SCANNER 50    /* scanner-path prefix hit         */
 #define NGX_SENTINEL_DEFAULT_W_BOT     30    /* heuristic bot user-agent        */
+#define NGX_SENTINEL_DEFAULT_W_HEADER  25    /* request-header anomaly          */
 
 /* Hard ceiling for the computed score (overflow/abuse guard). */
 #define NGX_SENTINEL_SCORE_MAX         100000
@@ -185,6 +186,9 @@ typedef struct {
     ngx_flag_t  bot_ua;
     ngx_flag_t  known_good_ua;     /* forward-confirmed search engine UA */
 
+    /* Header-anomaly: suspicious/malformed request headers */
+    ngx_flag_t  header_anomaly;
+
     /* CrowdSec: IP present + unexpired in the crowdsec ban table */
     ngx_flag_t  crowdsec_hit;
     u_char      crowdsec_action;   /* NGX_SENTINEL_CS_* — verdict/score tiering */
@@ -227,6 +231,7 @@ typedef struct {
     ngx_int_t  blocked;   /* added once if errrate_blocked */
     ngx_int_t  scanner;   /* added once if scanner_path    */
     ngx_int_t  bot;       /* added once if bot_ua          */
+    ngx_int_t  header;    /* added once if header_anomaly  */
     ngx_int_t  crowdsec;  /* base weight for a crowdsec ban hit (tiered) */
 } ngx_sentinel_weights_t;
 
@@ -323,6 +328,18 @@ void sentinel_errrate_signal(ngx_http_request_t *r,
  * from the User-Agent header using static substring tables (no regex).
  */
 void sentinel_botua_signal(ngx_http_request_t *r,
+    ngx_sentinel_inputs_t *inputs);
+
+/* -------------------------------------------------------------------------
+ * Header-anomaly API (sentinel_header.c)
+ * ---------------------------------------------------------------------- */
+
+/*
+ * sentinel_header_signal — fill inputs->header_anomaly (1 = suspicious
+ * request headers) from r->headers_in. Pure-HTTP, no regex, no I/O.
+ * Fail-open: NULL request -> header_anomaly = 0.
+ */
+void sentinel_header_signal(ngx_http_request_t *r,
     ngx_sentinel_inputs_t *inputs);
 
 /* -------------------------------------------------------------------------
