@@ -10,6 +10,7 @@ ngx_module_srcs="$ngx_addon_dir/src/ngx_http_sentinel_module.c \
                  $ngx_addon_dir/src/sentinel_shm.c \
                  $ngx_addon_dir/src/sentinel_score.c \
                  $ngx_addon_dir/src/sentinel_tarpit.c \
-                 $ngx_addon_dir/src/sentinel_feed.c"
+                 $ngx_addon_dir/src/sentinel_feed.c \
+                 $ngx_addon_dir/src/sentinel_velocity.c"
 ngx_module_libs="-lcrypto"
 . auto/module

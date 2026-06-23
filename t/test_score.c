@@ -52,6 +52,7 @@ typedef int            ngx_flag_t;
 #define NGX_SENTINEL_DEFAULT_W_BOT     30
 #define NGX_SENTINEL_DEFAULT_W_HEADER  25
 #define NGX_SENTINEL_DEFAULT_W_HONEYPOT 90
+#define NGX_SENTINEL_DEFAULT_W_VELOCITY 30
 #define NGX_SENTINEL_DEFAULT_W_CROWDSEC 100
 
 #define NGX_SENTINEL_CS_NONE      0
@@ -79,6 +80,7 @@ typedef struct {
     ngx_flag_t  known_good_ua;
     ngx_flag_t  header_anomaly;
     ngx_flag_t  honeypot;
+    ngx_flag_t  velocity_exceeded;
     ngx_flag_t  crowdsec_hit;
     u_char      crowdsec_action;
 } ngx_sentinel_inputs_t;
@@ -96,6 +98,7 @@ typedef struct {
     ngx_int_t  bot;
     ngx_int_t  header;
     ngx_int_t  honeypot;  /* added once if honeypot        */
+    ngx_int_t  velocity;
     ngx_int_t  crowdsec;
 } ngx_sentinel_weights_t;
 
@@ -150,6 +153,7 @@ make_lcf(ngx_int_t w_errrate, ngx_int_t w_blocked,
     lcf.weights.scanner  = w_scanner;
     lcf.weights.bot      = w_bot;
     lcf.weights.honeypot = 0;  /* caller sets explicitly when testing honeypot */
+    lcf.weights.velocity = 0;  /* caller sets explicitly when testing velocity */
     lcf.weights.crowdsec = NGX_SENTINEL_DEFAULT_W_CROWDSEC;
     lcf.threshold.challenge = NGX_SENTINEL_DEFAULT_THRESH_CH;
     lcf.threshold.tarpit    = NGX_SENTINEL_DEFAULT_THRESH_TP;
@@ -444,6 +448,35 @@ main(void)
     inp = make_inputs(0, 0, 0, 0, 0);
     inp.honeypot = 0;
     ASSERT_EQ("honeypot=0 → 0",
+              sentinel_score_compute(&inp, &lcf), 0);
+
+    /* ------------------------------------------------------------------
+     * (h) Velocity signal: inputs->velocity_exceeded adds w_velocity once.
+     * ------------------------------------------------------------------ */
+
+    /* velocity_exceeded=1, weight=30 → score 30. */
+    lcf = make_lcf(0, 0, 0, 0);
+    lcf.weights.velocity = NGX_SENTINEL_DEFAULT_W_VELOCITY;
+    inp = make_inputs(0, 0, 0, 0, 0);
+    inp.velocity_exceeded = 1;
+    ASSERT_EQ("velocity only: 30",
+              sentinel_score_compute(&inp, &lcf),
+              NGX_SENTINEL_DEFAULT_W_VELOCITY);
+
+    /* velocity + scanner combined: 30 + 50 = 80. */
+    lcf = make_lcf(0, 0, 50, 0);
+    lcf.weights.velocity = NGX_SENTINEL_DEFAULT_W_VELOCITY;
+    inp = make_inputs(0, 0, 1, 0, 0);
+    inp.velocity_exceeded = 1;
+    ASSERT_EQ("velocity + scanner: 30 + 50 = 80",
+              sentinel_score_compute(&inp, &lcf), 80);
+
+    /* velocity_exceeded=0 → no contribution. */
+    lcf = make_lcf(0, 0, 0, 0);
+    lcf.weights.velocity = NGX_SENTINEL_DEFAULT_W_VELOCITY;
+    inp = make_inputs(0, 0, 0, 0, 0);
+    inp.velocity_exceeded = 0;
+    ASSERT_EQ("velocity=0 → 0",
               sentinel_score_compute(&inp, &lcf), 0);
 
     /* ------------------------------------------------------------------
