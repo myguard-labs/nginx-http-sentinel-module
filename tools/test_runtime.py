@@ -72,8 +72,29 @@ def expect_status(port: int, path: str, expected: int,
 
 def nginx_config(root: pathlib.Path, port: int,
                  module: pathlib.Path | None, workers: int,
-                 tarpit_max_conns: int = 256) -> str:
+                 tarpit_max_conns: int = 256,
+                 cs_feed: str = "", cs_max_bytes: str = "16m") -> str:
     load = f"load_module {module};\n" if module else ""
+    # Phase 3: crowdsec feed location. ASCII only (the harness writes config as
+    # ASCII). Short interval so a feed change is reflected quickly in tests.
+    cs_block = ""
+    if cs_feed:
+        cs_block = f"""
+        # Phase 3 - crowdsec decision feed. Static content (CONTENT phase) so
+        # PREACCESS runs and reads the crowdsec table. Shadow mode keeps the
+        # request flowing while $sentinel_score/$sentinel_verdict are logged.
+        location = /cs {{
+            sentinel on;
+            sentinel_mode shadow;
+            sentinel_crowdsec_feed {cs_feed};
+            sentinel_crowdsec_interval 1;
+            sentinel_crowdsec_stale_after 30;
+            sentinel_crowdsec_default_ttl 60;
+            sentinel_crowdsec_max_bytes {cs_max_bytes};
+            access_log {root}/logs/cs.log sentinelvars;
+        }}
+"""
+    cs_zone = "    sentinel_crowdsec_zone cs:2m;\n" if cs_feed else ""
     return f"""{load}worker_processes {workers};
 pid {root}/nginx.pid;
 error_log {root}/logs/error.log info;
@@ -88,6 +109,7 @@ http {{
     log_format sentinelvars '$uri $sentinel_score $sentinel_verdict $sentinel_ja4h';
 
     sentinel_zone main:1m;
+{cs_zone}
 
     server {{
         listen 127.0.0.1:{port};
@@ -176,7 +198,7 @@ http {{
             sentinel_tarpit_bytes 64;
             sentinel_tarpit_max_lifetime 2000;
         }}
-    }}
+{cs_block}    }}
 }}
 """
 
@@ -194,26 +216,35 @@ class Nginx:
         # Remembered so start() (which rewrites the config) keeps the configured
         # cap instead of silently resetting it to the default.
         self.tarpit_max_conns = 256
+        self.cs_feed = ""
+        self.cs_max_bytes = "16m"
         self.process: subprocess.Popen[str] | None = None
         self.output_path = root / "nginx-output.log"
 
-    def write_config(self, tarpit_max_conns: int | None = None) -> None:
+    def write_config(self, tarpit_max_conns: int | None = None,
+                     cs_feed: str | None = None) -> None:
         if tarpit_max_conns is None:
             tarpit_max_conns = self.tarpit_max_conns
         else:
             self.tarpit_max_conns = tarpit_max_conns
+        if cs_feed is None:
+            cs_feed = self.cs_feed
+        else:
+            self.cs_feed = cs_feed
         workers = 1 if self.single_process else 2
         (self.root / "conf").mkdir(parents=True, exist_ok=True)
         (self.root / "logs").mkdir(parents=True, exist_ok=True)
         html = self.root / "html"
         html.mkdir(parents=True, exist_ok=True)
-        # Static targets for the tarpit/shadow locations (served in the CONTENT
-        # phase so PREACCESS — and thus the sentinel enforce handler — runs).
-        for name in ("tarpit", "tarpit-life", "tarpit-shadow"):
+        # Static targets for the tarpit/shadow/cs locations (served in the
+        # CONTENT phase so PREACCESS — and the sentinel handler — runs).
+        for name in ("tarpit", "tarpit-life", "tarpit-shadow", "cs"):
             (html / name).write_text("ok\n", encoding="ascii")
         (self.root / "conf" / "nginx.conf").write_text(
             nginx_config(self.root, self.port, self.module, workers,
-                         tarpit_max_conns=tarpit_max_conns),
+                         tarpit_max_conns=tarpit_max_conns,
+                         cs_feed=cs_feed,
+                         cs_max_bytes=self.cs_max_bytes),
             encoding="ascii",
         )
 
@@ -332,6 +363,79 @@ def count_log_matches(log_path: pathlib.Path, pattern: str) -> int:
         return 0
     return sum(1 for ln in log_path.read_text(encoding="utf-8", errors="replace")
                .splitlines() if re.search(pattern, ln))
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 crowdsec feed helpers
+# ---------------------------------------------------------------------------
+
+import zlib
+
+
+def build_feed(decisions: list[tuple[str, str, int]],
+               *, header: bool = True,
+               extra_comment: bool = True,
+               override_count: int | None = None,
+               corrupt_crc: bool = False,
+               truncate_body: bool = False) -> str:
+    """Build a flat crowdsec feed.
+
+    decisions: list of (ip, action, expiry_epoch).
+    The CRC32 (zlib.crc32, == ngx_crc32_long) is taken over the decision-line
+    region: every byte after the header line and before the %%EOF trailer.
+    All output is ASCII (no em-dash / arrow) so the harness can write it.
+    """
+    lines = []
+    if header:
+        lines.append("# sentinel-crowdsec-feed v1")
+    # The body region (CRC'd) starts right after the header line.
+    body_lines = []
+    if extra_comment:
+        body_lines.append(f"# generated test count={len(decisions)}")
+    for ip, action, expiry in decisions:
+        body_lines.append(f"{ip} {action} {expiry}")
+
+    body = "".join(ln + "\n" for ln in body_lines)
+    if truncate_body:
+        # Drop the trailing newline of the last decision -> torn file.
+        body = body.rstrip("\n")
+
+    count = override_count if override_count is not None else len(decisions)
+    crc = zlib.crc32(body.encode("ascii")) & 0xFFFFFFFF
+    if corrupt_crc:
+        crc ^= 0xDEADBEEF
+        crc &= 0xFFFFFFFF
+    trailer = f"%%EOF {count} {crc:08x}\n"
+
+    return "".join(ln + "\n" for ln in lines) + body + trailer
+
+
+def write_feed(path: pathlib.Path, content: str, mtime: float | None = None) -> None:
+    """Atomic write (tmp + rename), optionally backdate mtime."""
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(content, encoding="ascii")
+    os.replace(tmp, path)
+    if mtime is not None:
+        os.utime(path, (mtime, mtime))
+
+
+def cs_score(root: pathlib.Path) -> int:
+    """Return the last logged $sentinel_score for /cs."""
+    log = root / "logs" / "cs.log"
+    if not log.exists():
+        return -1
+    lines = [ln.split() for ln in
+             log.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    if not lines:
+        return -1
+    return int(lines[-1][1])
+
+
+def cs_verdict(root: pathlib.Path) -> str:
+    log = root / "logs" / "cs.log"
+    lines = [ln.split() for ln in
+             log.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    return lines[-1][2] if lines else ""
 
 
 # ---------------------------------------------------------------------------
@@ -726,6 +830,226 @@ def main() -> int:
             nginx2.stop()
 
     print("OK: sentinel Phase 2 tarpit runtime tests passed")
+
+    # -----------------------------------------------------------------------
+    # Phase 3 tests (separate nginx instance + a crowdsec feed file).
+    # All requests originate from 127.0.0.1, so the feed keys on 127.0.0.1.
+    # Shadow mode: we assert on the LOGGED $sentinel_score / $sentinel_verdict
+    # (enforcement of block is Phase 2-deferred; scoring is what Phase 3 adds).
+    # -----------------------------------------------------------------------
+    with tempfile.TemporaryDirectory(prefix="sentinel-ci-p3-") as tmp3:
+        root3 = pathlib.Path(tmp3)
+        feed = root3 / "crowdsec.feed"
+        # Pre-create an empty-but-valid feed so config-test + startup succeed.
+        write_feed(feed, build_feed([]))
+
+        nginx3 = Nginx(binary, module, root3 / "server", args.port + 2,
+                       args.runner, args.single_process)
+        nginx3.cs_feed = str(feed)
+        nginx3.cs_max_bytes = "8192"   # small cap to exercise oversize reject
+        nginx3.write_config()
+        nginx3.config_test()
+
+        port3 = args.port + 2
+        srv3 = root3 / "server"
+
+        def reload_wait(seconds: float = 2.0) -> None:
+            # interval=1s + 1s first tick; wait long enough for a load tick.
+            time.sleep(seconds)
+
+        try:
+            nginx3.start()
+            reload_wait(2.5)  # let the first tick load the (empty) feed
+
+            # T3.0 baseline: no entry for 127.0.0.1 -> score 0.
+            fetch(port3, "/cs")
+            time.sleep(0.3)
+            base = cs_score(srv3)
+            if base != 0:
+                raise AssertionError(f"T3.0: baseline score expected 0, got {base}")
+            print("  T3.0 baseline-no-hit: PASS")
+
+            # T3.1 feed-update reflected: ban 127.0.0.1 -> score includes weight.
+            far = int(time.time()) + 3600
+            write_feed(feed, build_feed([("127.0.0.1", "ban", far)]))
+            reload_wait(2.5)
+            fetch(port3, "/cs")
+            time.sleep(0.3)
+            s = cs_score(srv3)
+            v = cs_verdict(srv3)
+            if s < 100:
+                raise AssertionError(
+                    f"T3.1: ban should add weight_crowdsec(100), got score={s}")
+            if v != "block":
+                raise AssertionError(f"T3.1: ban -> block verdict, got {v!r}")
+            print(f"  T3.1 feed-update-reflected: PASS (score={s} verdict={v})")
+
+            # T3.1b deletion honored: rewrite feed WITHOUT 127.0.0.1 -> score 0.
+            write_feed(feed, build_feed([("10.9.9.9", "ban", far)]))
+            reload_wait(2.5)
+            fetch(port3, "/cs")
+            time.sleep(0.3)
+            s = cs_score(srv3)
+            if s != 0:
+                raise AssertionError(
+                    f"T3.1b: after deletion, score should be 0, got {s}")
+            print("  T3.1b deletion-honored: PASS")
+
+            # T3.8 action tiering: captcha -> challenge band (not block).
+            write_feed(feed, build_feed([("127.0.0.1", "captcha", far)]))
+            reload_wait(2.5)
+            fetch(port3, "/cs")
+            time.sleep(0.3)
+            v = cs_verdict(srv3)
+            if v != "challenge":
+                raise AssertionError(f"T3.8: captcha -> challenge, got {v!r}")
+            # throttle -> tarpit band.
+            write_feed(feed, build_feed([("127.0.0.1", "throttle", far)]))
+            reload_wait(2.5)
+            fetch(port3, "/cs")
+            time.sleep(0.3)
+            v = cs_verdict(srv3)
+            if v != "tarpit":
+                raise AssertionError(f"T3.8: throttle -> tarpit, got {v!r}")
+            print("  T3.8 action-tiering: PASS")
+
+            # T3.2 expiry honored: ban with near expiry, then it lapses.
+            # Expiry must outlast the load tick (~2.5s) so the first fetch is a
+            # hit, but still lapse before the post-sleep fetch.
+            soon = int(time.time()) + 6
+            write_feed(feed, build_feed([("127.0.0.1", "ban", soon)]))
+            reload_wait(2.5)
+            fetch(port3, "/cs")
+            time.sleep(0.3)
+            s_hit = cs_score(srv3)
+            if s_hit < 100:
+                raise AssertionError(f"T3.2: expected hit before expiry, got {s_hit}")
+            time.sleep(4.5)  # let it expire (blocked_until <= now)
+            fetch(port3, "/cs")
+            time.sleep(0.3)
+            s_exp = cs_score(srv3)
+            if s_exp != 0:
+                raise AssertionError(
+                    f"T3.2: expected 0 after expiry, got {s_exp}")
+            print("  T3.2 expiry-honored: PASS")
+
+            # T3.4 malformed feed -> fail-open + keep last-good table.
+            # First establish a known-good ban...
+            write_feed(feed, build_feed([("127.0.0.1", "ban", far)]))
+            reload_wait(2.5)
+            fetch(port3, "/cs"); time.sleep(0.3)
+            if cs_score(srv3) < 100:
+                raise AssertionError("T3.4 setup: ban not active")
+            # ...then write a feed with a corrupt CRC (must be rejected).
+            write_feed(feed, build_feed([("8.8.8.8", "ban", far)],
+                                        corrupt_crc=True))
+            reload_wait(2.5)
+            fetch(port3, "/cs"); time.sleep(0.3)
+            if cs_score(srv3) < 100:
+                raise AssertionError(
+                    "T3.4: bad-CRC feed was applied (last-good not preserved)")
+            warns = count_log_matches(srv3 / "logs" / "error.log",
+                                      r"crowdsec feed.*(CRC|mismatch|trailer)")
+            if warns == 0:
+                raise AssertionError("T3.4: expected a WARN for bad-CRC feed")
+            print("  T3.4 malformed-fail-open: PASS")
+
+            # T3.4b a few malformed lines under threshold -> valid lines load.
+            content = build_feed([("127.0.0.1", "ban", far)])
+            # Inject one garbage line into the body, fix count + CRC by rebuilding
+            # manually so the trailer matches (1 valid + 1 malformed).
+            far2 = far
+            body = (f"# generated test count=1\n"
+                    f"garbage nonsense line here\n"
+                    f"127.0.0.1 ban {far2}\n")
+            crc = zlib.crc32(body.encode("ascii")) & 0xFFFFFFFF
+            content = ("# sentinel-crowdsec-feed v1\n" + body
+                       + f"%%EOF 1 {crc:08x}\n")
+            write_feed(feed, content)
+            reload_wait(2.5)
+            fetch(port3, "/cs"); time.sleep(0.3)
+            if cs_score(srv3) < 100:
+                raise AssertionError(
+                    "T3.4b: valid line not loaded alongside one malformed line")
+            print("  T3.4b malformed-under-threshold: PASS")
+
+            # T3.6 truncation: torn body (count/CRC mismatch) -> rejected.
+            write_feed(feed, build_feed([("127.0.0.1", "ban", far)]))  # last-good
+            reload_wait(2.5)
+            fetch(port3, "/cs"); time.sleep(0.3)
+            write_feed(feed, build_feed([("1.2.3.4", "ban", far),
+                                         ("5.6.7.8", "ban", far)],
+                                        truncate_body=True))
+            reload_wait(2.5)
+            fetch(port3, "/cs"); time.sleep(0.3)
+            if cs_score(srv3) < 100:
+                raise AssertionError(
+                    "T3.6: truncated feed applied (last-good not kept)")
+            print("  T3.6 truncation-rejected: PASS")
+
+            # T3.7 oversized feed -> rejected fail-open, no stall, no OOM.
+            # cs_max_bytes is configured to 8192 for this instance. Establish a
+            # last-good ban, then write an otherwise-valid feed > 8192 bytes;
+            # the loader must reject it on size BEFORE parsing and keep last-good.
+            write_feed(feed, build_feed([("127.0.0.1", "ban", far)]))  # last-good
+            reload_wait(2.5)
+            fetch(port3, "/cs"); time.sleep(0.3)
+            if cs_score(srv3) < 100:
+                raise AssertionError("T3.7 setup: ban not active")
+            big = [("127.0.0.1", "ban", far)]
+            # ~600 lines * ~20 bytes >> 8192-byte cap.
+            big += [(f"10.0.{i // 256}.{i % 256}", "ban", far)
+                    for i in range(600)]
+            oversize = build_feed(big)
+            assert len(oversize) > 8192, "oversize feed not actually oversize"
+            t0 = time.monotonic()
+            write_feed(feed, oversize)
+            reload_wait(2.5)
+            status, _, _ = fetch(port3, "/cs"); time.sleep(0.3)
+            if time.monotonic() - t0 > 10.0:
+                raise AssertionError("T3.7: oversized feed appears to have stalled")
+            if status != 200:
+                raise AssertionError(f"T3.7: oversize broke serving ({status})")
+            if cs_score(srv3) < 100:
+                raise AssertionError(
+                    "T3.7: oversized feed was applied (last-good not kept)")
+            over_warns = count_log_matches(srv3 / "logs" / "error.log",
+                                           r"crowdsec feed.*oversized")
+            if over_warns == 0:
+                raise AssertionError("T3.7: expected an oversized WARN")
+            print("  T3.7 oversized-reject: PASS")
+
+            # T3.5 stale feed: backdate mtime beyond stale_after(30s) -> WARN,
+            # existing entries kept (not wiped), request path still serves.
+            write_feed(feed, build_feed([("127.0.0.1", "ban", far)]))
+            reload_wait(2.5)
+            fetch(port3, "/cs"); time.sleep(0.3)
+            if cs_score(srv3) < 100:
+                raise AssertionError("T3.5 setup: ban not active")
+            old = time.time() - 120  # 2 min old > stale_after 30s
+            os.utime(feed, (old, old))
+            reload_wait(2.5)
+            status, _, _ = fetch(port3, "/cs")  # must still serve
+            time.sleep(0.3)
+            if status != 200:
+                raise AssertionError(f"T3.5: stale feed broke serving ({status})")
+            # entry should still be present (not wiped by stale).
+            if cs_score(srv3) < 100:
+                raise AssertionError(
+                    "T3.5: stale feed wiped the table (should keep entries)")
+            stale_warns = count_log_matches(srv3 / "logs" / "error.log",
+                                            r"crowdsec feed.*stale")
+            if stale_warns == 0:
+                raise AssertionError("T3.5: expected a stale WARN")
+            print("  T3.5 stale-feed-handling: PASS")
+
+            nginx3.stop()
+            nginx3.assert_clean_logs()
+
+        finally:
+            nginx3.stop()
+
+    print("OK: sentinel Phase 3 crowdsec runtime tests passed")
     return 0
 
 

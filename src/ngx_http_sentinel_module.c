@@ -46,6 +46,11 @@ static char *ngx_sentinel_set_tarpit_bytes(ngx_conf_t *cf,
 static char *ngx_sentinel_set_tarpit_lifetime(ngx_conf_t *cf,
     ngx_command_t *cmd, void *conf);
 
+static char *ngx_sentinel_set_crowdsec_zone(ngx_conf_t *cf,
+    ngx_command_t *cmd, void *conf);
+static char *ngx_sentinel_set_crowdsec_feed(ngx_conf_t *cf,
+    ngx_command_t *cmd, void *conf);
+
 static ngx_int_t ngx_sentinel_init_process(ngx_cycle_t *cycle);
 static ngx_int_t ngx_sentinel_init_tarpit_shm(ngx_conf_t *cf,
     ngx_sentinel_main_conf_t *mcf);
@@ -173,6 +178,64 @@ static ngx_command_t ngx_sentinel_commands[] = {
       0,
       NULL },
 
+    /* ---- Phase 3: crowdsec decision-feed directives ---- */
+
+    /* sentinel_crowdsec_zone name:size; — main context (declares the shm zone) */
+    { ngx_string("sentinel_crowdsec_zone"),
+      NGX_HTTP_MAIN_CONF | NGX_CONF_TAKE1,
+      ngx_sentinel_set_crowdsec_zone,
+      NGX_HTTP_MAIN_CONF_OFFSET,
+      0,
+      NULL },
+
+    /* sentinel_crowdsec_feed path; — location: feed file (off if unset) */
+    { ngx_string("sentinel_crowdsec_feed"),
+      NGX_HTTP_LOC_CONF | NGX_CONF_TAKE1,
+      ngx_sentinel_set_crowdsec_feed,
+      NGX_HTTP_LOC_CONF_OFFSET,
+      0,
+      NULL },
+
+    /* sentinel_crowdsec_interval time; — refresh tick (default 10s) */
+    { ngx_string("sentinel_crowdsec_interval"),
+      NGX_HTTP_LOC_CONF | NGX_CONF_TAKE1,
+      ngx_conf_set_sec_slot,
+      NGX_HTTP_LOC_CONF_OFFSET,
+      offsetof(ngx_sentinel_loc_conf_t, cs_interval),
+      NULL },
+
+    /* sentinel_crowdsec_default_ttl time; — TTL for expiry==0 lines */
+    { ngx_string("sentinel_crowdsec_default_ttl"),
+      NGX_HTTP_LOC_CONF | NGX_CONF_TAKE1,
+      ngx_conf_set_sec_slot,
+      NGX_HTTP_LOC_CONF_OFFSET,
+      offsetof(ngx_sentinel_loc_conf_t, cs_default_ttl),
+      NULL },
+
+    /* sentinel_crowdsec_stale_after time; — stale threshold + LRU age-out */
+    { ngx_string("sentinel_crowdsec_stale_after"),
+      NGX_HTTP_LOC_CONF | NGX_CONF_TAKE1,
+      ngx_conf_set_sec_slot,
+      NGX_HTTP_LOC_CONF_OFFSET,
+      offsetof(ngx_sentinel_loc_conf_t, cs_stale_after),
+      NULL },
+
+    /* sentinel_crowdsec_max_bytes size; — feed size cap */
+    { ngx_string("sentinel_crowdsec_max_bytes"),
+      NGX_HTTP_LOC_CONF | NGX_CONF_TAKE1,
+      ngx_conf_set_size_slot,
+      NGX_HTTP_LOC_CONF_OFFSET,
+      offsetof(ngx_sentinel_loc_conf_t, cs_max_bytes),
+      NULL },
+
+    /* sentinel_weight_crowdsec N; — base score weight for a crowdsec ban */
+    { ngx_string("sentinel_weight_crowdsec"),
+      NGX_HTTP_LOC_CONF | NGX_CONF_TAKE1,
+      ngx_conf_set_num_slot,
+      NGX_HTTP_LOC_CONF_OFFSET,
+      offsetof(ngx_sentinel_loc_conf_t, weights.crowdsec),
+      NULL },
+
     ngx_null_command
 };
 
@@ -279,6 +342,7 @@ ngx_sentinel_get_ctx(ngx_http_request_t *r)
     sentinel_ja4h_compute(r, ctx->inputs.ja4h);
     sentinel_errrate_signal(r, lcf, &ctx->inputs);
     sentinel_botua_signal(r, &ctx->inputs);
+    sentinel_crowdsec_signal(r, lcf, &ctx->inputs);
 
     /* Score + verdict (stub returns 0 -> always allow). */
     ctx->score   = sentinel_score_compute(&ctx->inputs, lcf);
@@ -399,14 +463,17 @@ ngx_sentinel_preaccess_handler(ngx_http_request_t *r)
     /* 3. Log score/verdict/ja4h at info level (always, in both modes). */
     ngx_log_error(NGX_LOG_INFO, r->connection->log, 0,
                   "sentinel: score=%i verdict=%s ja4h=%s "
-                  "shadow=%i errrate=%ui bot=%i scanner=%i",
+                  "shadow=%i errrate=%ui bot=%i scanner=%i "
+                  "crowdsec=%i cs_action=%ui",
                   ctx->score,
                   verdict_strings[ctx->verdict],
                   ctx->inputs.ja4h,
                   (ngx_int_t) lcf->shadow,
                   ctx->inputs.errrate_count,
                   (ngx_int_t) ctx->inputs.bot_ua,
-                  (ngx_int_t) ctx->inputs.scanner_path);
+                  (ngx_int_t) ctx->inputs.scanner_path,
+                  (ngx_int_t) ctx->inputs.crowdsec_hit,
+                  (ngx_uint_t) ctx->inputs.crowdsec_action);
 
     /* 4. Shadow mode: compute + log, never enforce → always pass. */
     if (lcf->shadow) {
@@ -623,6 +690,12 @@ ngx_sentinel_create_main_conf(ngx_conf_t *cf)
         return NULL;
     }
 
+    if (ngx_array_init(&mcf->cs_zones, cf->pool, 2,
+                       sizeof(ngx_sentinel_zone_t)) != NGX_OK)
+    {
+        return NULL;
+    }
+
     return mcf;
 }
 
@@ -648,6 +721,13 @@ ngx_sentinel_create_loc_conf(ngx_conf_t *cf)
     lcf->weights.blocked = NGX_CONF_UNSET;
     lcf->weights.scanner = NGX_CONF_UNSET;
     lcf->weights.bot     = NGX_CONF_UNSET;
+    lcf->weights.crowdsec = NGX_CONF_UNSET;
+
+    lcf->cs_zone         = NGX_CONF_UNSET_PTR;
+    lcf->cs_interval     = NGX_CONF_UNSET;
+    lcf->cs_default_ttl  = NGX_CONF_UNSET;
+    lcf->cs_stale_after  = NGX_CONF_UNSET;
+    lcf->cs_max_bytes    = NGX_CONF_UNSET_SIZE;
 
     lcf->tarpit_max_conns    = NGX_CONF_UNSET;
     lcf->tarpit_delay        = NGX_CONF_UNSET;
@@ -689,6 +769,68 @@ ngx_sentinel_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
     ngx_conf_merge_value(conf->weights.bot,
                          prev->weights.bot,
                          NGX_SENTINEL_DEFAULT_W_BOT);
+    ngx_conf_merge_value(conf->weights.crowdsec,
+                         prev->weights.crowdsec,
+                         NGX_SENTINEL_DEFAULT_W_CROWDSEC);
+
+    /* Phase 3 — crowdsec feed params. */
+    if (conf->cs_feed.len == 0) {
+        conf->cs_feed = prev->cs_feed;
+    }
+    ngx_conf_merge_ptr_value(conf->cs_zone, prev->cs_zone, NULL);
+    ngx_conf_merge_value(conf->cs_interval, prev->cs_interval,
+                         NGX_SENTINEL_CROWDSEC_DEFAULT_INTERVAL);
+    ngx_conf_merge_value(conf->cs_default_ttl, prev->cs_default_ttl,
+                         NGX_SENTINEL_CROWDSEC_DEFAULT_TTL);
+    ngx_conf_merge_value(conf->cs_stale_after, prev->cs_stale_after,
+                         NGX_SENTINEL_CROWDSEC_DEFAULT_STALE);
+    ngx_conf_merge_size_value(conf->cs_max_bytes, prev->cs_max_bytes,
+                         (size_t) NGX_SENTINEL_CROWDSEC_DEFAULT_MAXBYTES);
+
+    if (conf->weights.crowdsec < 0
+        || conf->weights.crowdsec > NGX_SENTINEL_SCORE_MAX)
+    {
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                           "sentinel_weight_crowdsec must be 0..%d",
+                           NGX_SENTINEL_SCORE_MAX);
+        return NGX_CONF_ERROR;
+    }
+    if (conf->cs_interval < NGX_SENTINEL_CROWDSEC_MIN_INTERVAL
+        || conf->cs_interval > NGX_SENTINEL_CROWDSEC_MAX_INTERVAL)
+    {
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                           "sentinel_crowdsec_interval must be %d..%d s",
+                           NGX_SENTINEL_CROWDSEC_MIN_INTERVAL,
+                           NGX_SENTINEL_CROWDSEC_MAX_INTERVAL);
+        return NGX_CONF_ERROR;
+    }
+    if (conf->cs_default_ttl < NGX_SENTINEL_CROWDSEC_MIN_TTL
+        || conf->cs_default_ttl > NGX_SENTINEL_CROWDSEC_MAX_TTL)
+    {
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                           "sentinel_crowdsec_default_ttl must be %d..%d s",
+                           NGX_SENTINEL_CROWDSEC_MIN_TTL,
+                           NGX_SENTINEL_CROWDSEC_MAX_TTL);
+        return NGX_CONF_ERROR;
+    }
+    if (conf->cs_stale_after < NGX_SENTINEL_CROWDSEC_MIN_STALE
+        || conf->cs_stale_after > NGX_SENTINEL_CROWDSEC_MAX_STALE)
+    {
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                           "sentinel_crowdsec_stale_after must be %d..%d s",
+                           NGX_SENTINEL_CROWDSEC_MIN_STALE,
+                           NGX_SENTINEL_CROWDSEC_MAX_STALE);
+        return NGX_CONF_ERROR;
+    }
+    if (conf->cs_max_bytes < ngx_pagesize
+        || conf->cs_max_bytes > (size_t) NGX_SENTINEL_CROWDSEC_MAX_MAXBYTES)
+    {
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                           "sentinel_crowdsec_max_bytes must be %uz..%d",
+                           (size_t) ngx_pagesize,
+                           NGX_SENTINEL_CROWDSEC_MAX_MAXBYTES);
+        return NGX_CONF_ERROR;
+    }
 
     ngx_conf_merge_value(conf->tarpit_max_conns,
                          prev->tarpit_max_conns, 256);
@@ -744,6 +886,30 @@ ngx_sentinel_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
             zones = mcf->zones.elts;
             conf->zone = &zones[0];
         }
+    }
+
+    /*
+     * Phase 3: bind to the single declared crowdsec zone if a feed is set but
+     * no explicit cs_zone was assigned. Mirrors the errrate single-zone logic.
+     */
+    if (conf->cs_zone == NULL && conf->cs_feed.len > 0) {
+        ngx_sentinel_main_conf_t  *mcf;
+
+        mcf = ngx_http_conf_get_module_main_conf(cf, ngx_http_sentinel_module);
+        if (mcf != NULL && mcf->cs_zones.nelts > 0) {
+            ngx_sentinel_zone_t  *zones = mcf->cs_zones.elts;
+            conf->cs_zone = &zones[0];
+        } else {
+            ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                               "sentinel_crowdsec_feed set but no "
+                               "sentinel_crowdsec_zone declared");
+            return NGX_CONF_ERROR;
+        }
+    }
+
+    /* The crowdsec zone's LRU age-out interval = stale_after. */
+    if (conf->cs_zone != NULL) {
+        conf->cs_zone->interval = conf->cs_stale_after;
     }
 
     return NGX_CONF_OK;
@@ -820,6 +986,104 @@ ngx_sentinel_set_zone(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
     shm->data = zone;
 
     zone->shm_zone = shm;
+
+    return NGX_CONF_OK;
+}
+
+static char *
+ngx_sentinel_set_crowdsec_zone(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
+{
+    ngx_sentinel_main_conf_t  *mcf = conf;
+    ngx_sentinel_zone_t       *zone;
+    ngx_str_t                 *value;
+    ngx_str_t                  name;
+    ssize_t                    size;
+    u_char                    *colon;
+    ngx_shm_zone_t            *shm;
+
+    value = cf->args->elts;
+
+    colon = ngx_strlchr(value[1].data,
+                        value[1].data + value[1].len, ':');
+    if (colon == NULL) {
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                           "invalid sentinel_crowdsec_zone \"%V\": "
+                           "expected name:size", &value[1]);
+        return NGX_CONF_ERROR;
+    }
+
+    name.data = value[1].data;
+    name.len  = (size_t) (colon - value[1].data);
+
+    {
+        ngx_str_t  sz_str;
+        sz_str.data = colon + 1;
+        sz_str.len  = value[1].len - name.len - 1;
+        size = ngx_parse_size(&sz_str);
+    }
+
+    if (size == NGX_ERROR || size < (ssize_t) ngx_pagesize) {
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                           "invalid sentinel_crowdsec_zone size in \"%V\"",
+                           &value[1]);
+        return NGX_CONF_ERROR;
+    }
+
+    zone = ngx_array_push(&mcf->cs_zones);
+    if (zone == NULL) {
+        return NGX_CONF_ERROR;
+    }
+
+    ngx_memzero(zone, sizeof(ngx_sentinel_zone_t));
+
+    zone->name.data = ngx_pnalloc(cf->pool, name.len);
+    if (zone->name.data == NULL) {
+        return NGX_CONF_ERROR;
+    }
+    ngx_memcpy(zone->name.data, name.data, name.len);
+    zone->name.len  = name.len;
+
+    /* crowdsec nodes carry no event ring (threshold==0); block unused. */
+    zone->interval  = NGX_SENTINEL_CROWDSEC_DEFAULT_STALE;
+    zone->block     = 0;
+    zone->threshold = 0;
+
+    shm = ngx_shared_memory_add(cf, &zone->name, (size_t) size,
+                                 &ngx_http_sentinel_module);
+    if (shm == NULL) {
+        return NGX_CONF_ERROR;
+    }
+
+    shm->init = sentinel_shm_init_zone;
+    shm->data = zone;
+
+    zone->shm_zone = shm;
+
+    return NGX_CONF_OK;
+}
+
+static char *
+ngx_sentinel_set_crowdsec_feed(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
+{
+    ngx_sentinel_loc_conf_t  *lcf = conf;
+    ngx_str_t                *value;
+
+    value = cf->args->elts;
+
+    if (value[1].len == 0) {
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                           "sentinel_crowdsec_feed path must be non-empty");
+        return NGX_CONF_ERROR;
+    }
+
+    /* NUL-terminate for ngx_file_info / ngx_open_file. */
+    lcf->cs_feed.len  = value[1].len;
+    lcf->cs_feed.data = ngx_pnalloc(cf->pool, value[1].len + 1);
+    if (lcf->cs_feed.data == NULL) {
+        return NGX_CONF_ERROR;
+    }
+    ngx_memcpy(lcf->cs_feed.data, value[1].data, value[1].len);
+    lcf->cs_feed.data[value[1].len] = '\0';
 
     return NGX_CONF_OK;
 }
@@ -1033,5 +1297,14 @@ ngx_sentinel_tarpit_shm_init(ngx_shm_zone_t *shm_zone, void *data)
 static ngx_int_t
 ngx_sentinel_init_process(ngx_cycle_t *cycle)
 {
-    return sentinel_tarpit_init_process(cycle);
+    ngx_int_t  rc;
+
+    rc = sentinel_tarpit_init_process(cycle);
+    if (rc != NGX_OK) {
+        return rc;
+    }
+
+    /* Phase 3: arm per-worker crowdsec feed-refresh timers (compose, don't
+     * clobber, the tarpit init). Fail-open: returns NGX_OK on any error. */
+    return sentinel_crowdsec_init_process(cycle);
 }

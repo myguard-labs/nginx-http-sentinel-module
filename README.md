@@ -67,6 +67,31 @@ passes.
 | `sentinel_tarpit_bytes N;` | `1024` | `1`–`65536` | Total bytes dripped before the response completes. |
 | `sentinel_tarpit_max_lifetime ms;` | `30000` | `1000`–`600000` | Hard ceiling on how long a tarpitted connection is held; force-closed at the deadline regardless of drip progress. |
 
+### CrowdSec feed (out-of-band)
+
+Sentinel never queries CrowdSec from the request path. An external sidecar (the
+CrowdSec lua bouncer in stream mode, or a small poller) writes decisions to a
+flat feed file; sentinel loads it into a dedicated shared-memory ban table on a
+worker timer and the request path does an O(1) locked lookup. A CrowdSec hit is
+scored, not hard-blocked: it folds `sentinel_weight_crowdsec` into the weighted
+sum (action-tiered — `ban` → block band, `captcha` → challenge band, `throttle`
+→ tarpit band), so it respects shadow mode and the `known_good_ua` short-circuit.
+
+Feed format: `# sentinel-crowdsec-feed v1` header, `<ip> <action> <expiry-epoch>`
+per line, `%%EOF <N> <crc32hex>` trailer (count + CRC32 validated before the
+table is touched; the writer must atomic-rename). Any malformed / truncated /
+oversized / stale feed → log + keep the last-good table (fail-open).
+
+| Directive | Default | Description |
+|---|---|---|
+| `sentinel_crowdsec_zone name:size;` | — | Dedicated shared-memory zone for the decision table (http context). |
+| `sentinel_crowdsec_feed path;` | — | Path to the flat feed file written by the sidecar. |
+| `sentinel_crowdsec_interval s;` | `10` | Refresh tick; the feed is reloaded only when its mtime changes. |
+| `sentinel_crowdsec_default_ttl s;` | `3600` | TTL applied to entries whose `expiry-epoch` is `0`. |
+| `sentinel_crowdsec_stale_after s;` | `600` | A feed older than this is treated as stale (logged); LRU age threshold. |
+| `sentinel_crowdsec_max_bytes N;` | `16m` | Feed size cap; a larger file is rejected (fail-open). |
+| `sentinel_weight_crowdsec N;` | `100` | Weight of a CrowdSec hit (scaled by action tier) in the score. |
+
 ### Scoring model
 
 ```
@@ -74,6 +99,7 @@ score = (sentinel_weight_errrate × errrate_count)
       + (sentinel_weight_blocked × errrate_blocked)   /* 0 or 1 */
       + (sentinel_weight_scanner × scanner_path)      /* 0 or 1 */
       + (sentinel_weight_bot     × bot_ua)            /* 0 or 1 */
+      + (sentinel_weight_crowdsec × crowdsec_hit × tier) /* ban/captcha/throttle */
 ```
 
 **Short-circuit:** if the User-Agent is a forward-confirmed search engine

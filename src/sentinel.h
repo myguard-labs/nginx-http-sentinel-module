@@ -58,6 +58,52 @@
 #define NGX_SENTINEL_SCORE_MAX         100000
 
 /* -------------------------------------------------------------------------
+ * Phase 3 — CrowdSec decision-feed constants
+ * ---------------------------------------------------------------------- */
+
+/* CrowdSec node action tiers (stored in node->cs_action). */
+#define NGX_SENTINEL_CS_NONE      0
+#define NGX_SENTINEL_CS_BAN       1
+#define NGX_SENTINEL_CS_CAPTCHA   2
+#define NGX_SENTINEL_CS_THROTTLE  3
+
+/* Refresh tick (seconds). */
+#define NGX_SENTINEL_CROWDSEC_DEFAULT_INTERVAL    10
+#define NGX_SENTINEL_CROWDSEC_MIN_INTERVAL        1
+#define NGX_SENTINEL_CROWDSEC_MAX_INTERVAL        3600
+
+/* TTL applied to lines whose expiry epoch == 0. */
+#define NGX_SENTINEL_CROWDSEC_DEFAULT_TTL         3600
+#define NGX_SENTINEL_CROWDSEC_MIN_TTL             60
+#define NGX_SENTINEL_CROWDSEC_MAX_TTL             86400
+
+/* Feed-age threshold => stale; also LRU age-out interval. */
+#define NGX_SENTINEL_CROWDSEC_DEFAULT_STALE       600
+#define NGX_SENTINEL_CROWDSEC_MIN_STALE           30
+#define NGX_SENTINEL_CROWDSEC_MAX_STALE           86400
+
+/* Feed size cap (bytes). */
+#define NGX_SENTINEL_CROWDSEC_DEFAULT_MAXBYTES    (16 * 1024 * 1024)
+#define NGX_SENTINEL_CROWDSEC_MAX_MAXBYTES        (64 * 1024 * 1024)
+
+/* Default score weight added for a crowdsec ban. */
+#define NGX_SENTINEL_DEFAULT_W_CROWDSEC           100
+
+/* Parse batch (lines) — bound the work per pass; single-pass for v1, but the
+ * constant documents the intended chunk size. */
+#define NGX_SENTINEL_FEED_PARSE_BATCH             4096
+
+/* Apply batch (nodes per locked critical section during the swap). */
+#define NGX_SENTINEL_FEED_APPLY_BATCH             256
+
+/* Max acceptable fraction of malformed lines before the whole file is rejected
+ * (expressed as 1/N: reject if malformed*4 > total, i.e. > 25%). */
+#define NGX_SENTINEL_FEED_MALFORMED_DENOM         4
+
+/* Feed header sentinel (first line). */
+#define NGX_SENTINEL_FEED_HEADER  "# sentinel-crowdsec-feed v1"
+
+/* -------------------------------------------------------------------------
  * Phase 2 — Tarpit constants
  * ---------------------------------------------------------------------- */
 
@@ -93,6 +139,8 @@ typedef struct {
     time_t             last_seen;
     ngx_uint_t         event_head;
     ngx_uint_t         event_count;
+    ngx_uint_t         cs_generation; /* crowdsec mark-and-sweep stamp (0 else) */
+    u_char             cs_action;     /* crowdsec action tier (0 for errrate)   */
     u_short            key_len;
     u_char             data[1];   /* key bytes then event timestamps (time_t[]) */
 } ngx_sentinel_node_t;
@@ -101,6 +149,7 @@ typedef struct {
     ngx_rbtree_t       rbtree;
     ngx_rbtree_node_t  sentinel_rb;
     ngx_queue_t        queue;
+    ngx_uint_t         cs_generation;  /* crowdsec swap generation (under lock) */
 } ngx_sentinel_shctx_t;
 
 /* -------------------------------------------------------------------------
@@ -135,6 +184,10 @@ typedef struct {
     /* Bot-UA: heuristic bot-UA signal */
     ngx_flag_t  bot_ua;
     ngx_flag_t  known_good_ua;     /* forward-confirmed search engine UA */
+
+    /* CrowdSec: IP present + unexpired in the crowdsec ban table */
+    ngx_flag_t  crowdsec_hit;
+    u_char      crowdsec_action;   /* NGX_SENTINEL_CS_* — verdict/score tiering */
 } ngx_sentinel_inputs_t;
 
 /* -------------------------------------------------------------------------
@@ -174,6 +227,7 @@ typedef struct {
     ngx_int_t  blocked;   /* added once if errrate_blocked */
     ngx_int_t  scanner;   /* added once if scanner_path    */
     ngx_int_t  bot;       /* added once if bot_ua          */
+    ngx_int_t  crowdsec;  /* base weight for a crowdsec ban hit (tiered) */
 } ngx_sentinel_weights_t;
 
 /* -------------------------------------------------------------------------
@@ -181,7 +235,8 @@ typedef struct {
  * ---------------------------------------------------------------------- */
 
 typedef struct {
-    ngx_array_t   zones;        /* ngx_sentinel_zone_t[]                            */
+    ngx_array_t   zones;        /* ngx_sentinel_zone_t[] (errrate)                  */
+    ngx_array_t   cs_zones;     /* ngx_sentinel_zone_t[] (crowdsec, Phase 3)        */
     ngx_atomic_t *tarpit_conns; /* per-worker sub-counters [NGX_MAX_PROCESSES]      */
                                 /* allocated in dedicated shm at sentinel_zone init  */
 } ngx_sentinel_main_conf_t;
@@ -193,6 +248,14 @@ typedef struct {
     ngx_sentinel_zone_t     *zone;      /* pointer into main conf zones array */
     ngx_sentinel_threshold_t threshold;
     ngx_sentinel_weights_t   weights;
+
+    /* Phase 3 — crowdsec decision feed */
+    ngx_sentinel_zone_t     *cs_zone;             /* crowdsec shm zone          */
+    ngx_str_t                cs_feed;             /* feed file path (empty=off) */
+    ngx_int_t                cs_interval;         /* refresh tick (seconds)     */
+    ngx_int_t                cs_default_ttl;      /* TTL for expiry==0 lines     */
+    ngx_int_t                cs_stale_after;      /* stale threshold + LRU age   */
+    size_t                   cs_max_bytes;        /* feed size cap (bytes)       */
 
     /* Phase 2 — tarpit parameters */
     ngx_int_t                tarpit_max_conns;    /* global cap across workers      */
@@ -302,6 +365,58 @@ ngx_int_t sentinel_tarpit_start(ngx_http_request_t *r,
  * Called from the module init_process hook to self-heal after hard kills.
  */
 ngx_int_t sentinel_tarpit_init_process(ngx_cycle_t *cycle);
+
+/* -------------------------------------------------------------------------
+ * Phase 3 — CrowdSec feed loader + read API (sentinel_feed.c)
+ * ---------------------------------------------------------------------- */
+
+/*
+ * sentinel_shm_crowdsec_upsert — insert/update a crowdsec ban node for `key`.
+ * Sets blocked_until=expiry, cs_action, stamps cs_generation. Caller holds the
+ * zone lock. Returns NGX_OK (stored), NGX_ERROR (zone full / bad args).
+ */
+ngx_int_t sentinel_shm_crowdsec_upsert(ngx_sentinel_zone_t *zone,
+    ngx_str_t *key, time_t expiry, u_char action, ngx_uint_t generation,
+    time_t now);
+
+/*
+ * sentinel_shm_crowdsec_sweep — delete crowdsec nodes whose cs_generation does
+ * not equal `generation` (absent from the latest feed). Caller holds the lock.
+ * Bounded to `batch` deletions per call; returns the number deleted.
+ */
+ngx_uint_t sentinel_shm_crowdsec_sweep(ngx_sentinel_zone_t *zone,
+    ngx_uint_t generation, ngx_uint_t batch);
+
+/*
+ * sentinel_shm_crowdsec_lookup — O(1) read of the crowdsec table.
+ * Returns NGX_BUSY + *action if key present with blocked_until > now;
+ * NGX_OK (no hit) otherwise; NGX_ERROR on zone error. Takes the zone lock.
+ */
+ngx_int_t sentinel_shm_crowdsec_lookup(ngx_sentinel_zone_t *zone,
+    ngx_str_t *key, time_t now, u_char *action);
+
+/*
+ * sentinel_feed_parse — parse a flat feed buffer in-place into the crowdsec
+ * zone. Validates the header + %%EOF trailer (count + CRC32) BEFORE touching
+ * shm. Returns NGX_OK (applied), NGX_DECLINED (rejected: bad trailer/crc/count/
+ * oversized-malformed), NGX_ERROR (zone error). On NGX_DECLINED/NGX_ERROR the
+ * live table is left untouched (fail-open). Pure byte scan, no regex, no JSON.
+ */
+ngx_int_t sentinel_feed_parse(ngx_sentinel_zone_t *zone, ngx_log_t *log,
+    u_char *data, size_t len, ngx_int_t default_ttl, time_t now);
+
+/*
+ * sentinel_crowdsec_signal — request-path read: fill inputs->crowdsec_hit and
+ * inputs->crowdsec_action from the crowdsec table. Fail-open.
+ */
+void sentinel_crowdsec_signal(ngx_http_request_t *r,
+    ngx_sentinel_loc_conf_t *lcf, ngx_sentinel_inputs_t *inputs);
+
+/*
+ * sentinel_crowdsec_init_process — arm the per-worker feed-refresh timer for
+ * every sentinel location that has a crowdsec feed configured.
+ */
+ngx_int_t sentinel_crowdsec_init_process(ngx_cycle_t *cycle);
 
 /* -------------------------------------------------------------------------
  * Variable index (set by ngx_http_sentinel_module.c, used by sub-files)

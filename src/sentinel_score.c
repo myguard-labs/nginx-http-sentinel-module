@@ -7,10 +7,17 @@
  * Plain weighted sum over the in-module signals (auditable, no ML, no regex,
  * no allocation, no I/O):
  *
- *   score = w_errrate * errrate_count
- *         + w_blocked * errrate_blocked
- *         + w_scanner * scanner_path
- *         + w_bot     * bot_ua
+ *   score = w_errrate  * errrate_count
+ *         + w_blocked  * errrate_blocked
+ *         + w_scanner  * scanner_path
+ *         + w_bot      * bot_ua
+ *         + w_crowdsec * crowdsec_hit (action-tiered: see below)
+ *
+ * CrowdSec action tiering (keeps weaker actions out of the block band):
+ *   ban      => full w_crowdsec        (block band at default weight 100)
+ *   captcha  => w_crowdsec * 40 / 100  (challenge band: >=30 <60 default)
+ *   throttle => w_crowdsec * 65 / 100  (tarpit band:    >=60 <80 default)
+ * Plain integer arithmetic, a single switch — no table lookup in the hot path.
  *
  * known_good_ua (forward-confirmed search engine) short-circuits to 0 and
  * overrides every other signal. The result is clamped to
@@ -80,6 +87,26 @@ sentinel_score_compute(const ngx_sentinel_inputs_t *inputs,
 
     if (inputs->bot_ua) {
         sentinel_score_add(&score, w->bot);
+    }
+
+    /* CrowdSec hit — action-tiered fraction of w_crowdsec (no block escalation
+     * for captcha/throttle). known_good_ua above already short-circuited. */
+    if (inputs->crowdsec_hit && w->crowdsec > 0) {
+        ngx_int_t  term;
+
+        switch (inputs->crowdsec_action) {
+        case NGX_SENTINEL_CS_CAPTCHA:
+            term = w->crowdsec * 40 / 100;
+            break;
+        case NGX_SENTINEL_CS_THROTTLE:
+            term = w->crowdsec * 65 / 100;
+            break;
+        case NGX_SENTINEL_CS_BAN:
+        default:
+            term = w->crowdsec;
+            break;
+        }
+        sentinel_score_add(&score, term);
     }
 
     if (score < 0) {

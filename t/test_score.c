@@ -50,6 +50,12 @@ typedef int            ngx_flag_t;
 #define NGX_SENTINEL_DEFAULT_W_BLOCKED 100
 #define NGX_SENTINEL_DEFAULT_W_SCANNER 50
 #define NGX_SENTINEL_DEFAULT_W_BOT     30
+#define NGX_SENTINEL_DEFAULT_W_CROWDSEC 100
+
+#define NGX_SENTINEL_CS_NONE      0
+#define NGX_SENTINEL_CS_BAN       1
+#define NGX_SENTINEL_CS_CAPTCHA   2
+#define NGX_SENTINEL_CS_THROTTLE  3
 
 #define NGX_SENTINEL_DEFAULT_THRESH_CH 30
 #define NGX_SENTINEL_DEFAULT_THRESH_TP 60
@@ -69,6 +75,8 @@ typedef struct {
     ngx_flag_t  scanner_path;
     ngx_flag_t  bot_ua;
     ngx_flag_t  known_good_ua;
+    ngx_flag_t  crowdsec_hit;
+    u_char      crowdsec_action;
 } ngx_sentinel_inputs_t;
 
 typedef struct {
@@ -82,6 +90,7 @@ typedef struct {
     ngx_int_t  blocked;
     ngx_int_t  scanner;
     ngx_int_t  bot;
+    ngx_int_t  crowdsec;
 } ngx_sentinel_weights_t;
 
 /* Minimal loc-conf stub: only weights field is used by sentinel_score.c. */
@@ -134,6 +143,7 @@ make_lcf(ngx_int_t w_errrate, ngx_int_t w_blocked,
     lcf.weights.blocked  = w_blocked;
     lcf.weights.scanner  = w_scanner;
     lcf.weights.bot      = w_bot;
+    lcf.weights.crowdsec = NGX_SENTINEL_DEFAULT_W_CROWDSEC;
     lcf.threshold.challenge = NGX_SENTINEL_DEFAULT_THRESH_CH;
     lcf.threshold.tarpit    = NGX_SENTINEL_DEFAULT_THRESH_TP;
     lcf.threshold.block     = NGX_SENTINEL_DEFAULT_THRESH_BK;
@@ -251,6 +261,91 @@ main(void)
     ASSERT_EQ("NULL lcf → 0", sentinel_score_compute(&inp, NULL), 0);
 
     ASSERT_EQ("NULL both → 0", sentinel_score_compute(NULL, NULL), 0);
+
+    /* ------------------------------------------------------------------
+     * (f) CrowdSec term: action-tiered weight, known_good short-circuit wins.
+     *     Default w_crowdsec=100; thresholds ch=30 tp=60 bk=80.
+     *     ban=100 (block), captcha=40 (challenge), throttle=65 (tarpit).
+     * ------------------------------------------------------------------ */
+
+    lcf = make_lcf(NGX_SENTINEL_DEFAULT_W_ERRRATE,
+                   NGX_SENTINEL_DEFAULT_W_BLOCKED,
+                   NGX_SENTINEL_DEFAULT_W_SCANNER,
+                   NGX_SENTINEL_DEFAULT_W_BOT);
+
+    /* crowdsec ban only -> full weight 100 (block band). */
+    inp = make_inputs(0, 0, 0, 0, 0);
+    inp.crowdsec_hit = 1;
+    inp.crowdsec_action = NGX_SENTINEL_CS_BAN;
+    score = sentinel_score_compute(&inp, &lcf);
+    ASSERT_EQ("crowdsec ban -> 100", score, 100);
+
+    /* crowdsec captcha -> 100*40/100 = 40 (challenge band). */
+    inp = make_inputs(0, 0, 0, 0, 0);
+    inp.crowdsec_hit = 1;
+    inp.crowdsec_action = NGX_SENTINEL_CS_CAPTCHA;
+    score = sentinel_score_compute(&inp, &lcf);
+    ASSERT_EQ("crowdsec captcha -> 40", score, 40);
+    ASSERT_EQ("captcha -> challenge band",
+              sentinel_score_to_verdict(score, &lcf.threshold),
+              NGX_SENTINEL_VERDICT_CHALLENGE);
+
+    /* crowdsec throttle -> 100*65/100 = 65 (tarpit band). */
+    inp = make_inputs(0, 0, 0, 0, 0);
+    inp.crowdsec_hit = 1;
+    inp.crowdsec_action = NGX_SENTINEL_CS_THROTTLE;
+    score = sentinel_score_compute(&inp, &lcf);
+    ASSERT_EQ("crowdsec throttle -> 65", score, 65);
+    ASSERT_EQ("throttle -> tarpit band",
+              sentinel_score_to_verdict(score, &lcf.threshold),
+              NGX_SENTINEL_VERDICT_TARPIT);
+
+    /* ban -> block band. */
+    inp = make_inputs(0, 0, 0, 0, 0);
+    inp.crowdsec_hit = 1;
+    inp.crowdsec_action = NGX_SENTINEL_CS_BAN;
+    score = sentinel_score_compute(&inp, &lcf);
+    ASSERT_EQ("ban -> block band",
+              sentinel_score_to_verdict(score, &lcf.threshold),
+              NGX_SENTINEL_VERDICT_BLOCK);
+
+    /* crowdsec weighted with custom weight: w=200, captcha -> 80. */
+    lcf = make_lcf(0, 0, 0, 0);
+    lcf.weights.crowdsec = 200;
+    inp = make_inputs(0, 0, 0, 0, 0);
+    inp.crowdsec_hit = 1;
+    inp.crowdsec_action = NGX_SENTINEL_CS_CAPTCHA;
+    ASSERT_EQ("crowdsec captcha w=200 -> 80",
+              sentinel_score_compute(&inp, &lcf), 80);
+
+    /* known_good_ua short-circuit STILL wins over a crowdsec ban. */
+    lcf = make_lcf(NGX_SENTINEL_DEFAULT_W_ERRRATE,
+                   NGX_SENTINEL_DEFAULT_W_BLOCKED,
+                   NGX_SENTINEL_DEFAULT_W_SCANNER,
+                   NGX_SENTINEL_DEFAULT_W_BOT);
+    inp = make_inputs(0, 0, 0, 0, 1);   /* known_good_ua = 1 */
+    inp.crowdsec_hit = 1;
+    inp.crowdsec_action = NGX_SENTINEL_CS_BAN;
+    ASSERT_EQ("known_good_ua beats crowdsec ban -> 0",
+              sentinel_score_compute(&inp, &lcf), 0);
+
+    /* crowdsec hit but weight 0 -> no contribution. */
+    lcf = make_lcf(0, 0, 0, 0);
+    lcf.weights.crowdsec = 0;
+    inp = make_inputs(0, 0, 0, 0, 0);
+    inp.crowdsec_hit = 1;
+    inp.crowdsec_action = NGX_SENTINEL_CS_BAN;
+    ASSERT_EQ("crowdsec weight 0 -> 0",
+              sentinel_score_compute(&inp, &lcf), 0);
+
+    /* crowdsec folds additively with other signals. */
+    lcf = make_lcf(0, 0, 10, 0);
+    lcf.weights.crowdsec = 100;
+    inp = make_inputs(0, 0, 1, 0, 0);   /* scanner=1 -> +10 */
+    inp.crowdsec_hit = 1;
+    inp.crowdsec_action = NGX_SENTINEL_CS_BAN;  /* +100 */
+    ASSERT_EQ("crowdsec ban + scanner = 110",
+              sentinel_score_compute(&inp, &lcf), 110);
 
     /* ------------------------------------------------------------------
      * (e) Verdict mapping: block > tarpit > challenge > allow at boundaries.

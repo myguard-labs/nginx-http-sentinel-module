@@ -218,6 +218,7 @@ sentinel_shm_init_zone(ngx_shm_zone_t *shm_zone, void *data)
     ngx_rbtree_init(&zone->sh->rbtree, &zone->sh->sentinel_rb,
                     sentinel_shm_rbtree_insert);
     ngx_queue_init(&zone->sh->queue);
+    zone->sh->cs_generation = 0;  /* slab_alloc does not zero; mark-sweep tag */
 
     len = sizeof(" in sentinel zone \"\"") + zone->name.len;
     zone->shpool->log_ctx = ngx_slab_alloc(zone->shpool, len);
@@ -281,6 +282,150 @@ sentinel_shm_errrate_lookup(ngx_sentinel_zone_t *zone, ngx_str_t *key,
 
     ngx_shmtx_unlock(&zone->shpool->mutex);
     return NGX_OK;
+}
+
+/* -------------------------------------------------------------------------
+ * Phase 3 — CrowdSec ban table helpers
+ *
+ * CrowdSec nodes share ngx_sentinel_node_t but allocate with NO event ring
+ * (the crowdsec zone has threshold==0). blocked_until = decision expiry;
+ * cs_action / cs_generation carry the action tier and mark-sweep stamp.
+ * ---------------------------------------------------------------------- */
+
+/* Allocate a crowdsec node (slab) with no event ring. NULL on zone-full. */
+static ngx_sentinel_node_t *
+sentinel_shm_crowdsec_create(ngx_sentinel_zone_t *zone, uint32_t hash,
+    ngx_str_t *key, time_t now)
+{
+    size_t                size;
+    ngx_sentinel_node_t  *n;
+
+    /* node + key bytes only (threshold==0 => zero-length event ring). */
+    size = sizeof(ngx_sentinel_node_t) + key->len;
+
+    n = ngx_slab_calloc_locked(zone->shpool, size);
+    if (n == NULL) {
+        return NULL;
+    }
+
+    n->node.key      = hash;
+    n->key_len       = (u_short) key->len;
+    n->last_seen     = now;
+    n->event_head    = 0;
+    n->event_count   = 0;
+    n->blocked_until = 0;
+    n->cs_action     = NGX_SENTINEL_CS_NONE;
+    n->cs_generation = 0;
+    ngx_memcpy(n->data, key->data, key->len);
+
+    ngx_rbtree_insert(&zone->sh->rbtree, &n->node);
+    ngx_queue_insert_head(&zone->sh->queue, &n->queue);
+
+    return n;
+}
+
+ngx_int_t
+sentinel_shm_crowdsec_upsert(ngx_sentinel_zone_t *zone, ngx_str_t *key,
+    time_t expiry, u_char action, ngx_uint_t generation, time_t now)
+{
+    uint32_t              hash;
+    ngx_sentinel_node_t  *n;
+
+    if (zone == NULL || zone->sh == NULL || zone->shpool == NULL) {
+        return NGX_ERROR;
+    }
+
+    hash = ngx_crc32_short(key->data, key->len);
+
+    n = sentinel_shm_lookup(zone, hash, key);
+    if (n == NULL) {
+        n = sentinel_shm_crowdsec_create(zone, hash, key, now);
+        if (n == NULL) {
+            return NGX_ERROR;   /* zone full — caller logs partial load */
+        }
+    } else {
+        sentinel_shm_touch(zone, n);
+    }
+
+    n->blocked_until = expiry;
+    n->cs_action     = action;
+    n->cs_generation = generation;
+    n->last_seen     = now;
+
+    return NGX_OK;
+}
+
+ngx_uint_t
+sentinel_shm_crowdsec_sweep(ngx_sentinel_zone_t *zone, ngx_uint_t generation,
+    ngx_uint_t batch)
+{
+    ngx_queue_t          *q, *prev;
+    ngx_sentinel_node_t  *n;
+    ngx_uint_t            deleted = 0;
+
+    if (zone == NULL || zone->sh == NULL) {
+        return 0;
+    }
+
+    q = ngx_queue_last(&zone->sh->queue);
+
+    while (q != ngx_queue_sentinel(&zone->sh->queue) && deleted < batch) {
+        prev = ngx_queue_prev(q);
+        n = ngx_queue_data(q, ngx_sentinel_node_t, queue);
+
+        if (n->cs_generation != generation) {
+            ngx_queue_remove(&n->queue);
+            ngx_rbtree_delete(&zone->sh->rbtree, &n->node);
+            ngx_slab_free_locked(zone->shpool, n);
+            deleted++;
+        }
+
+        q = prev;
+    }
+
+    return deleted;
+}
+
+ngx_int_t
+sentinel_shm_crowdsec_lookup(ngx_sentinel_zone_t *zone, ngx_str_t *key,
+    time_t now, u_char *action)
+{
+    uint32_t              hash;
+    ngx_sentinel_node_t  *n;
+    ngx_int_t             rc;
+
+    *action = NGX_SENTINEL_CS_NONE;
+
+    if (zone == NULL || zone->sh == NULL || zone->shpool == NULL) {
+        return NGX_ERROR;
+    }
+
+    hash = ngx_crc32_short(key->data, key->len);
+
+    ngx_shmtx_lock(&zone->shpool->mutex);
+
+    /* TTL/LRU backstop: ages out abandoned entries (interval=stale_after). */
+    sentinel_shm_expire(zone, now, NGX_SENTINEL_EXPIRE_BATCH);
+
+    n = sentinel_shm_lookup(zone, hash, key);
+
+    if (n == NULL || n->blocked_until <= now) {
+        rc = NGX_OK;
+        if (n != NULL) {
+            sentinel_shm_touch(zone, n);
+            n->last_seen = now;
+        }
+        ngx_shmtx_unlock(&zone->shpool->mutex);
+        return rc;
+    }
+
+    /* Copy action out while locked; the node may be freed after unlock. */
+    *action = n->cs_action;
+    sentinel_shm_touch(zone, n);
+    n->last_seen = now;
+
+    ngx_shmtx_unlock(&zone->shpool->mutex);
+    return NGX_BUSY;
 }
 
 /*
