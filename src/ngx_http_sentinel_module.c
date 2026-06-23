@@ -53,6 +53,8 @@ static char *ngx_sentinel_set_crowdsec_feed(ngx_conf_t *cf,
 
 static char *sentinel_conf_honeypot(ngx_conf_t *cf,
     ngx_command_t *cmd, void *conf);
+static char *ngx_sentinel_set_velocity_zone(ngx_conf_t *cf,
+    ngx_command_t *cmd, void *conf);
 
 static ngx_int_t ngx_sentinel_init_process(ngx_cycle_t *cycle);
 static ngx_int_t ngx_sentinel_init_tarpit_shm(ngx_conf_t *cf,
@@ -69,6 +71,8 @@ static ngx_int_t ngx_sentinel_var_ja4h(ngx_http_request_t *r,
 static ngx_int_t ngx_sentinel_var_header(ngx_http_request_t *r,
     ngx_http_variable_value_t *v, uintptr_t data);
 static ngx_int_t ngx_sentinel_var_honeypot(ngx_http_request_t *r,
+    ngx_http_variable_value_t *v, uintptr_t data);
+static ngx_int_t ngx_sentinel_var_velocity(ngx_http_request_t *r,
     ngx_http_variable_value_t *v, uintptr_t data);
 
 static ngx_sentinel_ctx_t *ngx_sentinel_get_ctx(ngx_http_request_t *r);
@@ -165,6 +169,22 @@ static ngx_command_t ngx_sentinel_commands[] = {
       ngx_conf_set_num_slot,
       NGX_HTTP_LOC_CONF_OFFSET,
       offsetof(ngx_sentinel_loc_conf_t, weights.honeypot),
+      NULL },
+
+    /* sentinel_velocity_zone name:size [rate=N] [window=S] [block=S]; — main context */
+    { ngx_string("sentinel_velocity_zone"),
+      NGX_HTTP_MAIN_CONF | NGX_CONF_1MORE,
+      ngx_sentinel_set_velocity_zone,
+      NGX_HTTP_MAIN_CONF_OFFSET,
+      0,
+      NULL },
+
+    /* sentinel_weight_velocity N; — added once if velocity_exceeded */
+    { ngx_string("sentinel_weight_velocity"),
+      NGX_HTTP_LOC_CONF | NGX_CONF_TAKE1,
+      ngx_conf_set_num_slot,
+      NGX_HTTP_LOC_CONF_OFFSET,
+      offsetof(ngx_sentinel_loc_conf_t, weights.velocity),
       NULL },
 
     /* sentinel_honeypot <path> [path ...]; — decoy path prefix(es) */
@@ -328,6 +348,9 @@ static ngx_http_variable_t ngx_sentinel_vars[] = {
     { ngx_string("sentinel_honeypot"), NULL,
       ngx_sentinel_var_honeypot, 0, NGX_HTTP_VAR_NOCACHEABLE, 0 },
 
+    { ngx_string("sentinel_velocity"), NULL,
+      ngx_sentinel_var_velocity, 0, NGX_HTTP_VAR_NOCACHEABLE, 0 },
+
     { ngx_null_string, NULL, NULL, 0, 0, 0 }
 };
 
@@ -381,6 +404,7 @@ ngx_sentinel_get_ctx(ngx_http_request_t *r)
     sentinel_botua_signal(r, &ctx->inputs);
     sentinel_header_signal(r, &ctx->inputs);
     sentinel_honeypot_signal(r, lcf, &ctx->inputs);
+    sentinel_velocity_signal(r, lcf, &ctx->inputs);
     sentinel_crowdsec_signal(r, lcf, &ctx->inputs);
 
     /* Score + verdict (stub returns 0 -> always allow). */
@@ -516,6 +540,27 @@ ngx_sentinel_var_honeypot(ngx_http_request_t *r, ngx_http_variable_value_t *v,
     return NGX_OK;
 }
 
+static ngx_int_t
+ngx_sentinel_var_velocity(ngx_http_request_t *r, ngx_http_variable_value_t *v,
+    uintptr_t data)
+{
+    ngx_sentinel_ctx_t  *ctx;
+
+    ctx = ngx_sentinel_get_ctx(r);
+    if (ctx == NULL) {
+        v->not_found = 1;
+        return NGX_OK;
+    }
+
+    v->len  = 1;
+    v->data = (u_char *) (ctx->inputs.velocity_exceeded ? "1" : "0");
+    v->valid  = 1;
+    v->not_found   = 0;
+    v->no_cacheable = 0;
+
+    return NGX_OK;
+}
+
 /* -------------------------------------------------------------------------
  * PREACCESS handler
  * ---------------------------------------------------------------------- */
@@ -545,7 +590,7 @@ ngx_sentinel_preaccess_handler(ngx_http_request_t *r)
     ngx_log_error(NGX_LOG_INFO, r->connection->log, 0,
                   "sentinel: score=%i verdict=%s ja4h=%s "
                   "shadow=%i errrate=%ui bot=%i scanner=%i header=%i "
-                  "honeypot=%i crowdsec=%i cs_action=%ui",
+                  "honeypot=%i velocity=%i crowdsec=%i cs_action=%ui",
                   ctx->score,
                   verdict_strings[ctx->verdict],
                   ctx->inputs.ja4h,
@@ -555,6 +600,7 @@ ngx_sentinel_preaccess_handler(ngx_http_request_t *r)
                   (ngx_int_t) ctx->inputs.scanner_path,
                   (ngx_int_t) ctx->inputs.header_anomaly,
                   (ngx_int_t) ctx->inputs.honeypot,
+                  (ngx_int_t) ctx->inputs.velocity_exceeded,
                   (ngx_int_t) ctx->inputs.crowdsec_hit,
                   (ngx_uint_t) ctx->inputs.crowdsec_action);
 
@@ -629,6 +675,7 @@ ngx_sentinel_log_handler(ngx_http_request_t *r)
 {
     ngx_sentinel_loc_conf_t  *lcf;
     ngx_sentinel_zone_t      *zone;
+    ngx_sentinel_zone_t      *vel_zone;
     u_char                    digest[SHA256_DIGEST_LENGTH];
     ngx_str_t                 key;
     ngx_uint_t                status;
@@ -641,30 +688,48 @@ ngx_sentinel_log_handler(ngx_http_request_t *r)
         return NGX_OK;
     }
 
-    zone = lcf->zone;
-    if (zone == NULL) {
-        return NGX_OK;  /* no zone configured — fail-open */
-    }
-
-    /*
-     * Determine response status.  Check err_status first (set by nginx
-     * internally for error pages), matching the access-log module convention.
-     */
-    status = (r->err_status != 0) ? r->err_status : r->headers_out.status;
-
-    /* Only record error responses. (TODO: make configurable in a later phase.) */
-    if (status < 400) {
+    /* Require a client address for any recording. */
+    if (r->connection->addr_text.len == 0) {
         return NGX_OK;
     }
 
-    /* Build identity: SHA-256($addr_text) — same derivation as errrate_signal. */
-    if (r->connection->addr_text.len == 0) {
-        return NGX_OK;  /* no client address — fail-open */
-    }
-
+    /* Compute digest once; reused by both velocity and errrate records. */
     SHA256(r->connection->addr_text.data, r->connection->addr_text.len, digest);
     key.data = digest;
     key.len  = NGX_SENTINEL_DIGEST_LEN;
+
+    /*
+     * Velocity: record on EVERY completed request (no status filter).
+     * Must run before the status<400 early-return below.
+     */
+    vel_zone = lcf->vel_zone;
+    if (vel_zone != NULL) {
+        rc = sentinel_shm_errrate_record(vel_zone, &key, ngx_time(),
+                                         &count, &blocked_until);
+        if (rc == NGX_ERROR) {
+            ngx_log_error(NGX_LOG_WARN, r->connection->log, 0,
+                          "sentinel: velocity record error for zone \"%V\" "
+                          "(fail-open)", &vel_zone->name);
+            /* fail-open: continue to errrate check */
+        } else {
+            ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+                           "sentinel: velocity recorded count=%ui", count);
+        }
+    }
+
+    /*
+     * Errrate: record only on error responses.
+     */
+    zone = lcf->zone;
+    if (zone == NULL) {
+        return NGX_OK;
+    }
+
+    status = (r->err_status != 0) ? r->err_status : r->headers_out.status;
+
+    if (status < 400) {
+        return NGX_OK;
+    }
 
     rc = sentinel_shm_errrate_record(zone, &key, ngx_time(), &count, &blocked_until);
 
@@ -779,6 +844,12 @@ ngx_sentinel_create_main_conf(ngx_conf_t *cf)
         return NULL;
     }
 
+    if (ngx_array_init(&mcf->vel_zones, cf->pool, 2,
+                       sizeof(ngx_sentinel_zone_t)) != NGX_OK)
+    {
+        return NULL;
+    }
+
     return mcf;
 }
 
@@ -807,6 +878,9 @@ ngx_sentinel_create_loc_conf(ngx_conf_t *cf)
     lcf->weights.header  = NGX_CONF_UNSET;
     lcf->weights.honeypot = NGX_CONF_UNSET;
     lcf->weights.crowdsec = NGX_CONF_UNSET;
+
+    lcf->vel_zone        = NGX_CONF_UNSET_PTR;
+    lcf->weights.velocity = NGX_CONF_UNSET;
 
     lcf->cs_zone         = NGX_CONF_UNSET_PTR;
     lcf->cs_interval     = NGX_CONF_UNSET;
@@ -860,6 +934,22 @@ ngx_sentinel_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
     ngx_conf_merge_value(conf->weights.honeypot,
                          prev->weights.honeypot,
                          NGX_SENTINEL_DEFAULT_W_HONEYPOT);
+    ngx_conf_merge_value(conf->weights.velocity,
+                         prev->weights.velocity,
+                         NGX_SENTINEL_DEFAULT_W_VELOCITY);
+    ngx_conf_merge_ptr_value(conf->vel_zone, prev->vel_zone, NULL);
+
+    /* Auto-bind to vel_zones[0] if no explicit vel_zone assigned. */
+    if (conf->vel_zone == NULL) {
+        ngx_sentinel_main_conf_t  *mcf2;
+        ngx_sentinel_zone_t       *vzones;
+
+        mcf2 = ngx_http_conf_get_module_main_conf(cf, ngx_http_sentinel_module);
+        if (mcf2 != NULL && mcf2->vel_zones.nelts > 0) {
+            vzones = mcf2->vel_zones.elts;
+            conf->vel_zone = &vzones[0];
+        }
+    }
 
     /* Inherit decoy_paths from parent if not set locally. */
     if (conf->decoy_paths.nelts == 0 && prev->decoy_paths.nelts > 0) {
@@ -1072,6 +1162,122 @@ ngx_sentinel_set_zone(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
     zone->interval  = NGX_SENTINEL_DEFAULT_INTERVAL;
     zone->block     = NGX_SENTINEL_DEFAULT_BLOCK;
     zone->threshold = NGX_SENTINEL_MAX_WINDOW_EVENTS;
+
+    shm = ngx_shared_memory_add(cf, &zone->name, (size_t) size,
+                                 &ngx_http_sentinel_module);
+    if (shm == NULL) {
+        return NGX_CONF_ERROR;
+    }
+
+    shm->init = sentinel_shm_init_zone;
+    shm->data = zone;
+
+    zone->shm_zone = shm;
+
+    return NGX_CONF_OK;
+}
+
+static char *
+ngx_sentinel_set_velocity_zone(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
+{
+    ngx_sentinel_main_conf_t  *mcf = conf;
+    ngx_sentinel_zone_t       *zone;
+    ngx_str_t                 *value;
+    ngx_str_t                  name;
+    ssize_t                    size;
+    u_char                    *colon;
+    ngx_shm_zone_t            *shm;
+    ngx_uint_t                 i;
+
+    value = cf->args->elts;
+
+    /* Parse "name:size" */
+    colon = ngx_strlchr(value[1].data,
+                        value[1].data + value[1].len, ':');
+    if (colon == NULL) {
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                           "invalid sentinel_velocity_zone \"%V\": "
+                           "expected name:size", &value[1]);
+        return NGX_CONF_ERROR;
+    }
+
+    name.data = value[1].data;
+    name.len  = (size_t) (colon - value[1].data);
+
+    {
+        ngx_str_t  sz_str;
+        sz_str.data = colon + 1;
+        sz_str.len  = value[1].len - name.len - 1;
+        size = ngx_parse_size(&sz_str);
+    }
+
+    if (size == NGX_ERROR || size < (ssize_t) ngx_pagesize) {
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                           "invalid sentinel_velocity_zone size in \"%V\"",
+                           &value[1]);
+        return NGX_CONF_ERROR;
+    }
+
+    zone = ngx_array_push(&mcf->vel_zones);
+    if (zone == NULL) {
+        return NGX_CONF_ERROR;
+    }
+
+    ngx_memzero(zone, sizeof(ngx_sentinel_zone_t));
+
+    zone->name.data = ngx_pnalloc(cf->pool, name.len);
+    if (zone->name.data == NULL) {
+        return NGX_CONF_ERROR;
+    }
+    ngx_memcpy(zone->name.data, name.data, name.len);
+    zone->name.len  = name.len;
+
+    zone->threshold = NGX_SENTINEL_VELOCITY_DEFAULT_THRESHOLD;
+    zone->interval  = NGX_SENTINEL_VELOCITY_DEFAULT_WINDOW;
+    zone->block     = NGX_SENTINEL_DEFAULT_BLOCK;
+
+    /* Parse optional rate=N window=S block=S key=value args */
+    for (i = 2; i < cf->args->nelts; i++) {
+        ngx_str_t  arg = value[i];
+        ngx_int_t  v;
+
+        if (ngx_strncmp(arg.data, "rate=", 5) == 0) {
+            ngx_str_t s = { arg.len - 5, arg.data + 5 };
+            v = ngx_atoi(s.data, s.len);
+            if (v == NGX_ERROR || v < 1) {
+                ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                                   "sentinel_velocity_zone: rate must be >= 1");
+                return NGX_CONF_ERROR;
+            }
+            zone->threshold = (ngx_uint_t) v;
+
+        } else if (ngx_strncmp(arg.data, "window=", 7) == 0) {
+            ngx_str_t s = { arg.len - 7, arg.data + 7 };
+            v = ngx_atoi(s.data, s.len);
+            if (v == NGX_ERROR || v < 1) {
+                ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                                   "sentinel_velocity_zone: window must be >= 1");
+                return NGX_CONF_ERROR;
+            }
+            zone->interval = (time_t) v;
+
+        } else if (ngx_strncmp(arg.data, "block=", 6) == 0) {
+            ngx_str_t s = { arg.len - 6, arg.data + 6 };
+            v = ngx_atoi(s.data, s.len);
+            if (v == NGX_ERROR || v < 1) {
+                ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                                   "sentinel_velocity_zone: block must be >= 1");
+                return NGX_CONF_ERROR;
+            }
+            zone->block = (time_t) v;
+
+        } else {
+            ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                               "sentinel_velocity_zone: unknown parameter \"%V\"",
+                               &arg);
+            return NGX_CONF_ERROR;
+        }
+    }
 
     shm = ngx_shared_memory_add(cf, &zone->name, (size_t) size,
                                  &ngx_http_sentinel_module);

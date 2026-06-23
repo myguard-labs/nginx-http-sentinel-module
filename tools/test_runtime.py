@@ -91,6 +91,7 @@ def nginx_config(root: pathlib.Path, port: int,
             sentinel_crowdsec_stale_after 30;
             sentinel_crowdsec_default_ttl 60;
             sentinel_crowdsec_max_bytes {cs_max_bytes};
+            sentinel_weight_velocity 0;
             access_log {root}/logs/cs.log sentinelvars;
         }}
 """
@@ -109,6 +110,7 @@ http {{
     log_format sentinelvars '$uri $sentinel_score $sentinel_verdict $sentinel_ja4h';
 
     sentinel_zone main:1m;
+    sentinel_velocity_zone vzone:1m rate=3 window=60;
 {cs_zone}
 
     server {{
@@ -118,6 +120,7 @@ http {{
         location = /shadow {{
             sentinel on;
             sentinel_mode shadow;
+            sentinel_weight_velocity 0;
             access_log {root}/logs/shadow.log sentinelvars;
             return 200 "ok";
         }}
@@ -132,6 +135,7 @@ http {{
         location = /vars {{
             sentinel on;
             sentinel_mode shadow;
+            sentinel_weight_velocity 0;
             access_log {root}/logs/vars.log sentinelvars;
             return 200 "vars";
         }}
@@ -140,6 +144,7 @@ http {{
         location = /err404 {{
             sentinel on;
             sentinel_mode shadow;
+            sentinel_weight_velocity 0;
             access_log {root}/logs/err404.log sentinelvars;
             return 404 "not found";
         }}
@@ -148,6 +153,7 @@ http {{
         location = /probe {{
             sentinel on;
             sentinel_mode shadow;
+            sentinel_weight_velocity 0;
             access_log {root}/logs/probe.log sentinelvars;
             return 200 "probe";
         }}
@@ -160,6 +166,7 @@ http {{
             sentinel on;
             sentinel_mode shadow;
             sentinel_weight_bot 0;
+            sentinel_weight_velocity 0;
             access_log {root}/logs/header.log sentinelvars;
             return 200 "header";
         }}
@@ -177,6 +184,7 @@ http {{
             sentinel_weight_bot 0;
             sentinel_weight_header 0;
             sentinel_weight_honeypot 90;
+            sentinel_weight_velocity 0;
             access_log {root}/logs/honeypot.log sentinelvars;
             return 200 "honeypot";
         }}
@@ -227,6 +235,21 @@ http {{
             sentinel_tarpit_bytes 64;
             sentinel_tarpit_max_lifetime 2000;
         }}
+        location = /velocity-test {{
+            sentinel on;
+            sentinel_mode shadow;
+            sentinel_weight_errrate 0;
+            sentinel_weight_blocked 0;
+            sentinel_weight_scanner 0;
+            sentinel_weight_bot 0;
+            sentinel_weight_header 0;
+            sentinel_weight_honeypot 0;
+            sentinel_weight_crowdsec 0;
+            sentinel_weight_velocity 30;
+            access_log {root}/logs/velocity.log sentinelvars;
+            return 200 "velocity";
+        }}
+
 {cs_block}    }}
 }}
 """
@@ -885,6 +908,34 @@ def main() -> int:
             if safe_score != 0:
                 raise AssertionError(
                     f"honeypot: /safe score must be 0; got {safe_score}")
+
+            # TEST 8: velocity — send enough requests to exceed rate=3 within
+            # the window; assert a later request logs $sentinel_score >= 30.
+            # The RECORD fires in the log handler after each request completes;
+            # PREACCESS reads the count from the PRIOR N-1 records. With rate=3,
+            # the 4th request sees count=3 (records from req 1,2,3) and the zone
+            # marks the identity blocked -> velocity_exceeded=1 -> score >= 30.
+            # Send 6 to give a clear margin.
+            for _ in range(6):
+                fetch(args.port, "/velocity-test")
+            time.sleep(0.3)
+
+            vel_log = root / "server" / "logs" / "velocity.log"
+            if not vel_log.exists():
+                raise AssertionError("velocity.log not written")
+            vlines = [ln.split() for ln in
+                      vel_log.read_text(encoding="utf-8").splitlines()
+                      if ln.strip()]
+            if len(vlines) < 4:
+                raise AssertionError(
+                    f"velocity.log: expected >= 4 lines, got {len(vlines)}")
+            # The last line (6th request) should have score >= 30 (velocity_exceeded=1).
+            last_vel_score = int(vlines[-1][1])
+            if last_vel_score < 30:
+                raise AssertionError(
+                    f"TEST 8 velocity: last request score must be >= 30 "
+                    f"(w_velocity); got {last_vel_score}")
+            print(f"  TEST 8 velocity: PASS (last score={last_vel_score})")
 
             nginx.stop()
             nginx.assert_clean_logs()

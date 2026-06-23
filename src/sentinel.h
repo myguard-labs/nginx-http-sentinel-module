@@ -55,6 +55,9 @@
 #define NGX_SENTINEL_DEFAULT_W_BOT     30    /* heuristic bot user-agent        */
 #define NGX_SENTINEL_DEFAULT_W_HEADER  25    /* request-header anomaly          */
 #define NGX_SENTINEL_DEFAULT_W_HONEYPOT 90   /* decoy-URL (honeypot) hit        */
+#define NGX_SENTINEL_DEFAULT_W_VELOCITY 30   /* request-rate abuse: meaningful but below scanner/honeypot */
+#define NGX_SENTINEL_VELOCITY_DEFAULT_THRESHOLD 100  /* requests per window */
+#define NGX_SENTINEL_VELOCITY_DEFAULT_WINDOW    10   /* seconds */
 
 /* Hard ceiling for the computed score (overflow/abuse guard). */
 #define NGX_SENTINEL_SCORE_MAX         100000
@@ -195,6 +198,9 @@ typedef struct {
     /* Honeypot: request URI matched a decoy-path prefix */
     ngx_flag_t  honeypot;
 
+    /* Velocity: request rate exceeded the configured threshold */
+    ngx_flag_t  velocity_exceeded;
+
     /* CrowdSec: IP present + unexpired in the crowdsec ban table */
     ngx_flag_t  crowdsec_hit;
     u_char      crowdsec_action;   /* NGX_SENTINEL_CS_* — verdict/score tiering */
@@ -239,6 +245,7 @@ typedef struct {
     ngx_int_t  bot;       /* added once if bot_ua          */
     ngx_int_t  header;    /* added once if header_anomaly  */
     ngx_int_t  honeypot;  /* added once if honeypot        */
+    ngx_int_t  velocity;  /* added once if velocity_exceeded */
     ngx_int_t  crowdsec;  /* base weight for a crowdsec ban hit (tiered) */
 } ngx_sentinel_weights_t;
 
@@ -249,6 +256,7 @@ typedef struct {
 typedef struct {
     ngx_array_t   zones;        /* ngx_sentinel_zone_t[] (errrate)                  */
     ngx_array_t   cs_zones;     /* ngx_sentinel_zone_t[] (crowdsec, Phase 3)        */
+    ngx_array_t   vel_zones;     /* ngx_sentinel_zone_t[] (velocity)             */
     ngx_atomic_t *tarpit_conns; /* per-worker sub-counters [NGX_MAX_PROCESSES]      */
                                 /* allocated in dedicated shm at sentinel_zone init  */
 } ngx_sentinel_main_conf_t;
@@ -258,6 +266,7 @@ typedef struct {
     ngx_flag_t               shadow;    /* 1=shadow, 0=enforce */
     ngx_flag_t               fail_open; /* 1=open (allow on error), 0=closed */
     ngx_sentinel_zone_t     *zone;      /* pointer into main conf zones array */
+    ngx_sentinel_zone_t     *vel_zone;   /* velocity shm zone (NULL=off) */
     ngx_sentinel_threshold_t threshold;
     ngx_sentinel_weights_t   weights;
 
@@ -363,6 +372,19 @@ void sentinel_header_signal(ngx_http_request_t *r,
  * Fail-open: NULL r / NULL lcf / empty decoy_paths → honeypot = 0.
  */
 void sentinel_honeypot_signal(ngx_http_request_t *r,
+    ngx_sentinel_loc_conf_t *lcf, ngx_sentinel_inputs_t *inputs);
+
+/* -------------------------------------------------------------------------
+ * Velocity API (sentinel_velocity.c)
+ * ---------------------------------------------------------------------- */
+
+/*
+ * sentinel_velocity_signal — check if the request rate for this identity
+ * exceeds the configured threshold, set inputs->velocity_exceeded = 1 if so.
+ * READ path only (preaccess). RECORD happens in the log handler on every
+ * request. Fail-open: NULL args or no vel_zone → velocity_exceeded stays 0.
+ */
+void sentinel_velocity_signal(ngx_http_request_t *r,
     ngx_sentinel_loc_conf_t *lcf, ngx_sentinel_inputs_t *inputs);
 
 /* -------------------------------------------------------------------------

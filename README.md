@@ -50,6 +50,32 @@ non-negative integer.
 | `sentinel_weight_bot N;` | `30` | Added once when the User-Agent header matches a heuristic bot-UA pattern. |
 | `sentinel_weight_header N;` | `25` | Added once when a request-header anomaly is detected (HTTP/1.1 without Host, Content-Length + Transfer-Encoding both present, duplicate Host, or neither Accept nor User-Agent). |
 | `sentinel_weight_honeypot N;` | `90` | Added once when the request URI matches a configured decoy-path prefix (see `sentinel_honeypot`). |
+| `sentinel_weight_velocity N;` | `30` | Added once when the request rate for this identity exceeds the configured threshold in the velocity zone. |
+
+### Velocity signal (`sentinel_velocity_zone`)
+
+Counts all completed requests per identity (SHA-256 of client IP) in a configurable sliding-window ring. If the count exceeds the configured `rate` threshold within `window` seconds, the identity is marked as rate-exceeded and `$sentinel_velocity` is set to `1`.
+
+**Directive:**
+```
+sentinel_velocity_zone name:size [rate=N] [window=S] [block=S];
+```
+- `name:size` — zone name and shared memory size (e.g. `vzone:10m`)
+- `rate=N` — max requests allowed per window (default: 100)
+- `window=S` — sliding-window duration in seconds (default: 10)
+- `block=S` — ban duration in seconds once rate is exceeded (default: 3600)
+
+**Weight directive:**
+```
+sentinel_weight_velocity 30;
+```
+Default weight: 30. Added once to the score when `velocity_exceeded=1`.
+
+**Variable:** `$sentinel_velocity` — `1` if rate exceeded, `0` otherwise.
+
+**Identity:** SHA-256 of `$remote_addr` text — same as errrate.
+
+**Implementation:** reuses the errrate sliding-window ring (`sentinel_shm_errrate_record` / `sentinel_shm_errrate_lookup`) with a separate zone. Recording fires in the log handler on **every** request (no status filter). Lookup (read) fires in PREACCESS via `sentinel_velocity_signal()`.
 
 ### Honeypot (location / server / http context)
 

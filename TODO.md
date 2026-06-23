@@ -65,7 +65,10 @@ Only if traffic shows JA4H/H2 evasion. Both need core surface beyond pure HTTP.
 ## Roadmap (post-core, incremental — layered on the score-then-act pipeline)
 Each = own small PR. Full catalog + config examples: the pitch page (DESIGN.md links it).
 - [x] signal: header-anomaly (no-Host/CL+TE/dup-Host/no-Accept+UA) — PR #1, merged to dev 2026-06-23
-- [ ] signals: HTTP/2 frame-order fingerprint; UA↔fingerprint coherence; datacenter/ASN (geoip2); velocity; honeypot
+- [x] signal: honeypot (operator decoy-path prefix match → w_honeypot 90) — PR #3, merged to dev 2026-06-23
+- [x] signal: velocity (request-rate per identity, reuses errrate shm ring; sentinel_velocity_zone name:size rate=/window=/block=; w_velocity 30) — PR #4, merged to dev 2026-06-23
+- [ ] velocity: per-LOCATION vel_zone binding (currently one global zone auto-binds to ALL locations like errrate; errrate is status-gated so benign, velocity records every request → needs per-route opt-in for selective rate limiting)
+- [ ] signals: HTTP/2 frame-order fingerprint; UA↔fingerprint coherence; datacenter/ASN (geoip2)
 - [ ] actions: built-in proof-of-work challenge; throttle (bandwidth-cap); cache-only origin-shield; tarpit maze mode; CrowdSec verdict feedback
 - [ ] ops: per-route policy; allowlist (verified search engines + monitoring); metrics → VTS/statsd/OTel; structured decision log; TTL soft-bans
 
