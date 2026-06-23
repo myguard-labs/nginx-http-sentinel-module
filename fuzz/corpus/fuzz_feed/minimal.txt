@@ -1,0 +1,4 @@
+# sentinel-crowdsec-feed v1
+# generated 2026-01-01T00:00:00Z count=1
+192.168.1.1 ban 9999999999
+%%EOF 1 e90aa4f2

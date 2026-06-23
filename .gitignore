@@ -11,13 +11,13 @@ __pycache__/
 .codex-*.txt
 t/servroot/
 
-# fuzzing: track only hand-written seed_* corpus inputs and crash repros;
-# ignore the binaries and the units libFuzzer discovers at runtime.
-fuzz/fuzz_*
-!fuzz/fuzz_*.c
+# fuzzing: track hand-written named seed corpus files (.txt/.bin) and crash
+# repros; ignore built binaries and hash-named units libFuzzer generates.
+fuzz/bin/
 fuzz/crash-*
 fuzz/corpus/*/*
-!fuzz/corpus/*/seed_*
+!fuzz/corpus/*/*.txt
+!fuzz/corpus/*/*.bin
 
 # agent worktrees / local tooling
 .claude/
