@@ -61,7 +61,7 @@ Locked decisions + non-negotiable safety rules. Read before coding any phase.
   (success / abort / timeout / worker exit).
 - No regex in the hot path.
 - Every function + feature gets a CI test in the same commit (build-test +
-  valgrind + asan + codeql; fuzz where input is attacker-controlled).
+  valgrind + asan + security-scanners; fuzz where input is attacker-controlled).
 
 ## Directive set (target)
 
