@@ -41,12 +41,12 @@ Static data only (ja4 blocklist file + in-module feed). Verdict = allow / 403 / 
 
 ## Phase 2 — Tarpit action `PR #2`
 Highest self-DoS risk → opus owns resource model.
-- [ ] `[opus]` design tarpit resource model (conn cap, timers, fixed buf, max lifetime) — spec first
-- [ ] `[sonnet]` implement drip to spec: content handler, ngx_add_timer, small writes, decrement on every exit
-- [ ] `[sonnet]` directives `sentinel_tarpit_max_conns/delay/bytes`; wire verdict=tarpit
-- [ ] `[sonnet]` CI: conn-cap enforced, no FD/mem leak under flood, abort/timeout paths (valgrind+asan)
-- [ ] `[codex]` audit leak/DoS surface
-- [ ] `[opus]` review concurrency → PR #2 → CI green → merge
+- [x] `[opus]` design tarpit resource model (conn cap, timers, fixed buf, max lifetime) — spec first
+- [x] `[sonnet]` implement drip to spec: content handler, ngx_add_timer, small writes, decrement on every exit
+- [x] `[sonnet]` directives `sentinel_tarpit_max_conns/delay/bytes`; wire verdict=tarpit
+- [x] `[sonnet]` CI: conn-cap enforced, no FD/mem leak under flood, abort/timeout paths (valgrind+asan)
+- [x] `[codex]` audit leak/DoS surface
+- [x] `[opus]` review concurrency → PR #2 → CI green → merge
 
 ## Phase 3 — CrowdSec live feed `PR #3`
 Out-of-band sync; request path untouched.
