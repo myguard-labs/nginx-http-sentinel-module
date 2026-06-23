@@ -238,6 +238,7 @@ http {{
         location = /velocity-test {{
             sentinel on;
             sentinel_mode shadow;
+            sentinel_velocity vzone;
             sentinel_weight_errrate 0;
             sentinel_weight_blocked 0;
             sentinel_weight_scanner 0;

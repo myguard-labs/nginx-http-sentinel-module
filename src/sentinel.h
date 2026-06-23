@@ -267,6 +267,7 @@ typedef struct {
     ngx_flag_t               fail_open; /* 1=open (allow on error), 0=closed */
     ngx_sentinel_zone_t     *zone;      /* pointer into main conf zones array */
     ngx_sentinel_zone_t     *vel_zone;   /* velocity shm zone (NULL=off) */
+    ngx_str_t                vel_zone_name;  /* pending name for sentinel_velocity bind */
     ngx_sentinel_threshold_t threshold;
     ngx_sentinel_weights_t   weights;
 

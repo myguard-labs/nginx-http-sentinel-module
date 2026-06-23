@@ -81,3 +81,38 @@ X-Verdict: allow
 --- request
 GET /thresh
 --- error_code: 200
+
+=== TEST 6: sentinel_velocity directive accepted, location bound to zone
+--- http_config
+    sentinel_zone test:1m;
+    sentinel_velocity_zone veltest:1m rate=10 window=5;
+--- config
+    sentinel on;
+    sentinel_mode shadow;
+    sentinel_velocity veltest;
+    add_header X-Velocity $sentinel_velocity;
+    location = /velbound {
+        return 200 "ok";
+    }
+--- request
+GET /velbound
+--- response_headers
+X-Velocity: 0
+--- error_code: 200
+
+=== TEST 7: location WITHOUT sentinel_velocity does not record velocity (no zone bound)
+--- http_config
+    sentinel_zone test:1m;
+    sentinel_velocity_zone veltest:1m rate=10 window=5;
+--- config
+    sentinel on;
+    sentinel_mode shadow;
+    add_header X-Velocity $sentinel_velocity;
+    location = /velunbound {
+        return 200 "ok";
+    }
+--- request
+GET /velunbound
+--- response_headers
+X-Velocity: 0
+--- error_code: 200
