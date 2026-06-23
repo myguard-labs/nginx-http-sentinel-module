@@ -50,12 +50,12 @@ Highest self-DoS risk → opus owns resource model.
 
 ## Phase 3 — CrowdSec live feed `PR #3`
 Out-of-band sync; request path untouched.
-- [ ] `[opus-low]` confirm feed path: lua bouncer stream → keyval → module (recommended) vs native client (defer)
-- [ ] `[sonnet]` consume decisions from keyval/file into ban table; honor feed TTL
-- [ ] `[sonnet]` key by ip + ja4; decision delete = entry removal
-- [ ] `[sonnet]` CI: feed-update reflected, expiry honored, malformed feed → fail-open + log
-- [ ] `[codex]` audit
-- [ ] `[opus-low]` fixes → PR #3 → CI green → merge
+- [x] `[opus-low]` confirm feed path: lua bouncer stream → keyval → module (recommended) vs native client (defer)
+- [x] `[sonnet]` consume decisions from keyval/file into ban table; honor feed TTL
+- [x] `[sonnet]` key by ip + ja4; decision delete = entry removal
+- [x] `[sonnet]` CI: feed-update reflected, expiry honored, malformed feed → fail-open + log
+- [x] `[codex]` audit
+- [x] `[opus-low]` fixes → PR #3 → CI green → merge
 
 ## Phase 4 — JA4 (TLS) + JA4T (patch-bearing, defer) `PR #4`
 Only if traffic shows JA4H/H2 evasion. Both need core surface beyond pure HTTP.
