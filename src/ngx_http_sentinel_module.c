@@ -21,6 +21,7 @@
  * ---------------------------------------------------------------------- */
 
 static ngx_int_t ngx_sentinel_preaccess_handler(ngx_http_request_t *r);
+static ngx_int_t ngx_sentinel_log_handler(ngx_http_request_t *r);
 static ngx_int_t ngx_sentinel_add_variables(ngx_conf_t *cf);
 static ngx_int_t ngx_sentinel_init(ngx_conf_t *cf);
 
@@ -398,6 +399,72 @@ ngx_sentinel_preaccess_handler(ngx_http_request_t *r)
 }
 
 /* -------------------------------------------------------------------------
+ * LOG-phase handler: record error events into the errrate sliding window.
+ *
+ * Called after the response is sent.  Only records when status >= 400.
+ * (Phase 1b: threshold hardcoded; a configurable status set is a later TODO.)
+ * No malloc: SHA-256 digest lives on the stack.  Fail-open on every error.
+ * ---------------------------------------------------------------------- */
+
+static ngx_int_t
+ngx_sentinel_log_handler(ngx_http_request_t *r)
+{
+    ngx_sentinel_loc_conf_t  *lcf;
+    ngx_sentinel_zone_t      *zone;
+    u_char                    digest[SHA256_DIGEST_LENGTH];
+    ngx_str_t                 key;
+    ngx_uint_t                status;
+    ngx_uint_t                count;
+    time_t                    blocked_until;
+    ngx_int_t                 rc;
+
+    lcf = ngx_http_get_module_loc_conf(r, ngx_http_sentinel_module);
+    if (!lcf->enabled) {
+        return NGX_OK;
+    }
+
+    zone = lcf->zone;
+    if (zone == NULL) {
+        return NGX_OK;  /* no zone configured — fail-open */
+    }
+
+    /*
+     * Determine response status.  Check err_status first (set by nginx
+     * internally for error pages), matching the access-log module convention.
+     */
+    status = (r->err_status != 0) ? r->err_status : r->headers_out.status;
+
+    /* Only record error responses. (TODO: make configurable in a later phase.) */
+    if (status < 400) {
+        return NGX_OK;
+    }
+
+    /* Build identity: SHA-256($addr_text) — same derivation as errrate_signal. */
+    if (r->connection->addr_text.len == 0) {
+        return NGX_OK;  /* no client address — fail-open */
+    }
+
+    SHA256(r->connection->addr_text.data, r->connection->addr_text.len, digest);
+    key.data = digest;
+    key.len  = NGX_SENTINEL_DIGEST_LEN;
+
+    rc = sentinel_shm_errrate_record(zone, &key, ngx_time(), &count, &blocked_until);
+
+    if (rc == NGX_ERROR) {
+        ngx_log_error(NGX_LOG_WARN, r->connection->log, 0,
+                      "sentinel: errrate record error for zone \"%V\" (fail-open)",
+                      &zone->name);
+        return NGX_OK;
+    }
+
+    ngx_log_debug2(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+                   "sentinel: errrate recorded status=%ui count=%ui",
+                   status, count);
+
+    return NGX_OK;
+}
+
+/* -------------------------------------------------------------------------
  * Module init: register phase handler
  * ---------------------------------------------------------------------- */
 
@@ -415,6 +482,13 @@ ngx_sentinel_init(ngx_conf_t *cf)
     }
 
     *h = ngx_sentinel_preaccess_handler;
+
+    h = ngx_array_push(&cmcf->phases[NGX_HTTP_LOG_PHASE].handlers);
+    if (h == NULL) {
+        return NGX_ERROR;
+    }
+
+    *h = ngx_sentinel_log_handler;
 
     return NGX_OK;
 }
@@ -504,6 +578,23 @@ ngx_sentinel_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
     /* inherit zone pointer from parent if not set locally */
     if (conf->zone == NULL) {
         conf->zone = prev->zone;
+    }
+
+    /*
+     * Phase 1: single global zone. No per-location zone-binding directive yet,
+     * so bind every sentinel location to the one configured sentinel_zone.
+     * TODO Phase 3: a per-location `sentinel_zone <name>;` reference for
+     * multiple named zones.
+     */
+    if (conf->zone == NULL) {
+        ngx_sentinel_main_conf_t  *mcf;
+        ngx_sentinel_zone_t       *zones;
+
+        mcf = ngx_http_conf_get_module_main_conf(cf, ngx_http_sentinel_module);
+        if (mcf != NULL && mcf->zones.nelts > 0) {
+            zones = mcf->zones.elts;
+            conf->zone = &zones[0];
+        }
     }
 
     return NGX_CONF_OK;

@@ -89,7 +89,7 @@ http {{
     server {{
         listen 127.0.0.1:{port};
 
-        # Shadow mode: sentinel on, shadow (default) — must pass every request.
+        # Shadow mode: sentinel on, shadow (default) - must pass every request.
         location = /shadow {{
             sentinel on;
             sentinel_mode shadow;
@@ -109,6 +109,22 @@ http {{
             sentinel_mode shadow;
             access_log {root}/logs/vars.log sentinelvars;
             return 200 "vars";
+        }}
+
+        # errrate recording: returns 404 so the log handler records each hit.
+        location = /err404 {{
+            sentinel on;
+            sentinel_mode shadow;
+            access_log {root}/logs/err404.log sentinelvars;
+            return 404 "not found";
+        }}
+
+        # Score probe: returns 200 so PREACCESS reads accumulated errrate count.
+        location = /probe {{
+            sentinel on;
+            sentinel_mode shadow;
+            access_log {root}/logs/probe.log sentinelvars;
+            return 200 "probe";
         }}
     }}
 }}
@@ -257,9 +273,51 @@ def main() -> int:
                     raise AssertionError(
                         f"expected ja4h 24 hex chars, got {len(ja4h)}: {ja4h!r}")
 
-            # TEST 4: bot UA in shadow mode — still 200 (no enforcement).
+            # TEST 4: bot UA in shadow mode - still 200 (no enforcement).
             expect_status(args.port, "/shadow", 200,
                           extra_headers={"User-Agent": "sqlmap/1.0"})
+
+            # TEST 5: errrate recording - score rises after repeated 404s.
+            #
+            # Hit /err404 (returns 404) N times from the same "client" (127.0.0.1).
+            # The LOG-phase handler records each 404 into the sliding window.
+            # Then hit /probe (returns 200) so PREACCESS reads the accumulated
+            # errrate_count; score = w_errrate * count (default w_errrate=1).
+            # We assert score > 0 on /probe after the 404 hits.
+            #
+            # Limitation: all requests share the same source IP (127.0.0.1) so
+            # the SHA-256 key is identical - this matches production behaviour
+            # (single client hammering errors).
+            N_ERRORS = 5
+            for _ in range(N_ERRORS):
+                status, _, _ = fetch(args.port, "/err404")
+                if status != 404:
+                    raise AssertionError(f"/err404: expected 404, got {status}")
+
+            # Give nginx a moment to flush the log phase (it's synchronous in
+            # the worker but we need the next request to pick up the recorded
+            # events via PREACCESS).  A tiny sleep covers any worker scheduling
+            # jitter under valgrind/ASAN.
+            time.sleep(0.1)
+
+            # Probe: the PREACCESS handler will read errrate_count from shm.
+            expect_status(args.port, "/probe", 200)
+            time.sleep(0.3)
+
+            probe_log = root / "server" / "logs" / "probe.log"
+            if not probe_log.exists():
+                raise AssertionError("probe.log not written")
+            probe_lines = [ln.split() for ln in
+                           probe_log.read_text(encoding="utf-8").splitlines()
+                           if ln.strip()]
+            if not probe_lines:
+                raise AssertionError("probe.log is empty")
+            probe_score = int(probe_lines[-1][1])
+            if probe_score <= 0:
+                raise AssertionError(
+                    f"errrate recording: expected score > 0 after {N_ERRORS} "
+                    f"404s, got score={probe_score} "
+                    f"(log handler may not be recording error events)")
 
             nginx.stop()
             nginx.assert_clean_logs()
@@ -267,7 +325,7 @@ def main() -> int:
         finally:
             nginx.stop()
 
-    print("OK: sentinel Phase 1 runtime tests passed")
+    print("OK: sentinel Phase 1/1b runtime tests passed")
     return 0
 
 
