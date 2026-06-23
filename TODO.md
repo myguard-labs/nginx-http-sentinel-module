@@ -34,6 +34,11 @@ Static data only (ja4 blocklist file + in-module feed). Verdict = allow / 403 / 
 - [x] `[codex]` audit Phase 1
 - [x] `[opus-low]` fix findings → PR #1 → CI green → merge
 
+## Phase 1b — wire errrate recording (carryover from Phase 1)
+- [ ] `[sonnet]` `sentinel_shm_errrate_record` exists + tested but NOT called: add
+      response-status output hook (header/log-phase) to feed the sliding counter,
+      so error-rate signal is live (Phase 1 only reads, never records yet)
+
 ## Phase 2 — Tarpit action `PR #2`
 Highest self-DoS risk → opus owns resource model.
 - [ ] `[opus]` design tarpit resource model (conn cap, timers, fixed buf, max lifetime) — spec first
