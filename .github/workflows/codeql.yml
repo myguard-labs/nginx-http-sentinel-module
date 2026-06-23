@@ -62,3 +62,30 @@ jobs:
         uses: github/codeql-action/analyze@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4
         with:
           category: /language:c-cpp
+          # This is a PRIVATE repo without GitHub Advanced Security, so the
+          # code-scanning SARIF API returns 403 "Resource not accessible by
+          # integration" and the job fails on upload even though the analysis
+          # itself is clean. Run the queries but write SARIF to disk instead of
+          # uploading; the job still fails if a query reports a problem.
+          # To restore the Security-tab dashboard, enable GHAS/code scanning in
+          # repo settings and flip this back to the default (upload: always).
+          upload: never
+          output: sarif-results
+          upload-database: false
+
+      - name: Fail on CodeQL findings
+        run: |
+          # We skip SARIF upload (private repo, no GHAS), so reinstate a gate:
+          # fail if any .sarif under sarif-results/ contains a result.
+          shopt -s nullglob
+          total=0
+          for f in sarif-results/*.sarif; do
+            n=$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(sum(len(r.get("results",[])) for r in d.get("runs",[])))' "$f")
+            echo "  $f: $n result(s)"
+            total=$((total + n))
+          done
+          echo "CodeQL total findings: $total"
+          if [ "$total" -gt 0 ]; then
+            echo "::error::CodeQL reported $total finding(s) — see logs above"
+            exit 1
+          fi

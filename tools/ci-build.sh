@@ -37,7 +37,13 @@ CC_OPT="-DNGX_DEBUG_PALLOC=1 -g3 -O0 -fno-omit-frame-pointer -funwind-tables"
 LD_OPT=""
 ADD_MODULE="--add-dynamic-module=$MODULE_DIR"
 if [ "$MODE" = "asan" ]; then
-    SAN="-fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer -g3 -O1"
+    # nginx core's own debug logging (ngx_vslprintf/ngx_sprintf_str) passes a
+    # NULL+len=0 buffer that UBSan flags as nonnull-attribute/pointer-overflow.
+    # These fire in nginx core, not the module, and abort the run under
+    # -fno-sanitize-recover. Suppress just those two core-noise checks on BOTH
+    # compilers (gcc + clang); keep every other UBSan check live. `function` is
+    # clang-only (gcc rejects it), so add it only on clang.
+    SAN="-fsanitize=address,undefined -fno-sanitize=nonnull-attribute,pointer-overflow -fno-sanitize-recover=undefined -fno-omit-frame-pointer -g3 -O1"
     if "${CC:-cc}" --version 2>/dev/null | grep -qi clang; then
         SAN="-fsanitize=address,undefined -fno-sanitize=function,nonnull-attribute,pointer-overflow -fno-sanitize-recover=undefined -fno-omit-frame-pointer -g3 -O1"
     fi

@@ -13,11 +13,27 @@
  * Helpers
  * ---------------------------------------------------------------------- */
 
-/* Return pointer to the event-timestamp array that lives after key bytes. */
+/* Return pointer to the event-timestamp array that lives after key bytes.
+ * The ring holds time_t (8-byte) values, so it must start on an 8-byte
+ * boundary. The slab allocator returns 8-aligned node pointers, but the
+ * data[] member itself sits at a 4-aligned offset (the trailing
+ * cs_action/key_len fields), and key_len is arbitrary (e.g. a 9-byte
+ * "127.0.0.1" IP string). Compute the ring offset from the 8-aligned node
+ * base and round the whole header span up to sizeof(time_t); anything else
+ * leaves the time_t stores/loads misaligned (UB; trapped by UBSan, would
+ * fault on strict-alignment arches). sentinel_shm_create_node sizes the
+ * allocation with the identical formula. */
+static ngx_inline size_t
+sentinel_events_offset(u_short key_len)
+{
+    return ngx_align(offsetof(ngx_sentinel_node_t, data) + key_len,
+                     sizeof(time_t));
+}
+
 static ngx_inline time_t *
 sentinel_node_events(ngx_sentinel_node_t *n)
 {
-    return (time_t *) (n->data + n->key_len);
+    return (time_t *) ((u_char *) n + sentinel_events_offset(n->key_len));
 }
 
 /* Expire the oldest (LRU tail) entries in batches to keep the zone bounded. */
@@ -123,9 +139,11 @@ sentinel_shm_create_node(ngx_sentinel_zone_t *zone, uint32_t hash,
     size_t                size;
     ngx_sentinel_node_t  *n;
 
-    /* node + key bytes + threshold * sizeof(time_t) for the event ring */
-    size = sizeof(ngx_sentinel_node_t)
-           + key->len
+    /* 8-aligned header span (node + key bytes, padded so the event ring
+     * starts on an 8-byte boundary) + threshold * sizeof(time_t) for the
+     * ring. Mirrors sentinel_node_events()/sentinel_events_offset(); without
+     * the padding the ring's time_t accesses are misaligned (UB). */
+    size = sentinel_events_offset((u_short) key->len)
            + zone->threshold * sizeof(time_t);
 
     n = ngx_slab_calloc_locked(zone->shpool, size);
