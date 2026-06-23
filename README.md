@@ -52,12 +52,12 @@ non-negative integer.
 | `sentinel_weight_honeypot N;` | `90` | Added once when the request URI matches a configured decoy-path prefix (see `sentinel_honeypot`). |
 | `sentinel_weight_velocity N;` | `30` | Added once when the request rate for this identity exceeds the configured threshold in the velocity zone. |
 
-### Velocity signal (`sentinel_velocity_zone`)
+### Velocity signal (`sentinel_velocity_zone` + `sentinel_velocity`)
 
 Counts all completed requests per identity (SHA-256 of client IP) in a configurable sliding-window ring. If the count exceeds the configured `rate` threshold within `window` seconds, the identity is marked as rate-exceeded and `$sentinel_velocity` is set to `1`.
 
-**Directive:**
-```
+**Zone declaration (http context):**
+```nginx
 sentinel_velocity_zone name:size [rate=N] [window=S] [block=S];
 ```
 - `name:size` — zone name and shared memory size (e.g. `vzone:10m`)
@@ -65,8 +65,34 @@ sentinel_velocity_zone name:size [rate=N] [window=S] [block=S];
 - `window=S` — sliding-window duration in seconds (default: 10)
 - `block=S` — ban duration in seconds once rate is exceeded (default: 3600)
 
-**Weight directive:**
+**Per-location opt-in (http / server / location context):**
+```nginx
+sentinel_velocity <zone_name>;
 ```
+Binds a location to a named velocity zone. **Velocity tracking is opt-in only** — a zone declared with `sentinel_velocity_zone` has no effect on a location unless that location (or a parent block) includes `sentinel_velocity <name>`. Nested locations inherit the binding from their parent unless they override it.
+
+**Example:**
+```nginx
+http {
+    sentinel_zone main:10m;
+    sentinel_velocity_zone vzone:10m rate=100 window=10 block=3600;
+
+    server {
+        sentinel on;
+        sentinel_velocity vzone;   # inherited by all locations below
+
+        location /api/ {
+            # inherits sentinel_velocity vzone
+        }
+        location /static/ {
+            # no sentinel_velocity — velocity NOT tracked here
+        }
+    }
+}
+```
+
+**Weight directive:**
+```nginx
 sentinel_weight_velocity 30;
 ```
 Default weight: 30. Added once to the score when `velocity_exceeded=1`.

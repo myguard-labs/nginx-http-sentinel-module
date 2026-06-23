@@ -67,7 +67,8 @@ Each = own small PR. Full catalog + config examples: the pitch page (DESIGN.md l
 - [x] signal: header-anomaly (no-Host/CL+TE/dup-Host/no-Accept+UA) — PR #1, merged to dev 2026-06-23
 - [x] signal: honeypot (operator decoy-path prefix match → w_honeypot 90) — PR #3, merged to dev 2026-06-23
 - [x] signal: velocity (request-rate per identity, reuses errrate shm ring; sentinel_velocity_zone name:size rate=/window=/block=; w_velocity 30) — PR #4, merged to dev 2026-06-23
-- [ ] velocity: per-LOCATION vel_zone binding (currently one global zone auto-binds to ALL locations like errrate; errrate is status-gated so benign, velocity records every request → needs per-route opt-in for selective rate limiting)
+- [x] velocity: per-LOCATION vel_zone binding — `sentinel_velocity <zone>;` opt-in dir, auto-bind removed, inherits to nested loc — PR #5, dev 2026-06-23
+- [ ] velocity: edge — name typo in child loc that ALSO inherits a parent binding silently keeps parent zone (vel_zone non-NULL → unknown-zone error not raised). Resolve name before merge_ptr inheritance, or clear vel_zone when own name set
 - [ ] signals: HTTP/2 frame-order fingerprint; UA↔fingerprint coherence; datacenter/ASN (geoip2)
 - [ ] actions: built-in proof-of-work challenge; throttle (bandwidth-cap); cache-only origin-shield; tarpit maze mode; CrowdSec verdict feedback
 - [ ] ops: per-route policy; allowlist (verified search engines + monitoring); metrics → VTS/statsd/OTel; structured decision log; TTL soft-bans

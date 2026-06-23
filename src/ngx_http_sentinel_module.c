@@ -55,6 +55,8 @@ static char *sentinel_conf_honeypot(ngx_conf_t *cf,
     ngx_command_t *cmd, void *conf);
 static char *ngx_sentinel_set_velocity_zone(ngx_conf_t *cf,
     ngx_command_t *cmd, void *conf);
+static char *ngx_sentinel_set_velocity_bind(ngx_conf_t *cf,
+    ngx_command_t *cmd, void *conf);
 
 static ngx_int_t ngx_sentinel_init_process(ngx_cycle_t *cycle);
 static ngx_int_t ngx_sentinel_init_tarpit_shm(ngx_conf_t *cf,
@@ -185,6 +187,14 @@ static ngx_command_t ngx_sentinel_commands[] = {
       ngx_conf_set_num_slot,
       NGX_HTTP_LOC_CONF_OFFSET,
       offsetof(ngx_sentinel_loc_conf_t, weights.velocity),
+      NULL },
+
+    /* sentinel_velocity <zone_name>; — bind this location to a velocity zone (opt-in) */
+    { ngx_string("sentinel_velocity"),
+      NGX_HTTP_MAIN_CONF | NGX_HTTP_SRV_CONF | NGX_HTTP_LOC_CONF | NGX_CONF_TAKE1,
+      ngx_sentinel_set_velocity_bind,
+      NGX_HTTP_LOC_CONF_OFFSET,
+      0,
       NULL },
 
     /* sentinel_honeypot <path> [path ...]; — decoy path prefix(es) */
@@ -939,15 +949,32 @@ ngx_sentinel_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
                          NGX_SENTINEL_DEFAULT_W_VELOCITY);
     ngx_conf_merge_ptr_value(conf->vel_zone, prev->vel_zone, NULL);
 
-    /* Auto-bind to vel_zones[0] if no explicit vel_zone assigned. */
-    if (conf->vel_zone == NULL) {
-        ngx_sentinel_main_conf_t  *mcf2;
-        ngx_sentinel_zone_t       *vzones;
+    /* inherit velocity binding name from parent location */
+    if (conf->vel_zone_name.len == 0 && prev->vel_zone_name.len > 0) {
+        conf->vel_zone_name = prev->vel_zone_name;
+    }
+    /* resolve name -> zone pointer */
+    if (conf->vel_zone_name.len > 0) {
+        ngx_sentinel_main_conf_t  *mcf;
+        ngx_sentinel_zone_t       *zones;
+        ngx_uint_t                 i;
 
-        mcf2 = ngx_http_conf_get_module_main_conf(cf, ngx_http_sentinel_module);
-        if (mcf2 != NULL && mcf2->vel_zones.nelts > 0) {
-            vzones = mcf2->vel_zones.elts;
-            conf->vel_zone = &vzones[0];
+        mcf = ngx_http_conf_get_module_main_conf(cf, ngx_http_sentinel_module);
+        zones = mcf->vel_zones.elts;
+        for (i = 0; i < mcf->vel_zones.nelts; i++) {
+            if (zones[i].name.len == conf->vel_zone_name.len
+                && ngx_strncmp(zones[i].name.data, conf->vel_zone_name.data,
+                               conf->vel_zone_name.len) == 0)
+            {
+                conf->vel_zone = &zones[i];
+                break;
+            }
+        }
+        if (conf->vel_zone == NULL || conf->vel_zone == NGX_CONF_UNSET_PTR) {
+            ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                               "sentinel_velocity: unknown velocity zone \"%V\"",
+                               &conf->vel_zone_name);
+            return NGX_CONF_ERROR;
         }
     }
 
@@ -1586,6 +1613,18 @@ sentinel_conf_honeypot(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 
         *slot = value[i];
     }
+
+    return NGX_CONF_OK;
+}
+
+static char *
+ngx_sentinel_set_velocity_bind(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
+{
+    ngx_sentinel_loc_conf_t  *lcf = conf;
+    ngx_str_t                *value;
+
+    value = cf->args->elts;
+    lcf->vel_zone_name = value[1];
 
     return NGX_CONF_OK;
 }
