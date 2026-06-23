@@ -82,3 +82,29 @@ fi
 UNIT_BIN="$ROOT/test_score"
 cc -std=c99 -I "$MODULE_DIR/src" -o "$UNIT_BIN" "$MODULE_DIR/t/test_score.c"
 "$UNIT_BIN"
+
+# ---------------------------------------------------------------------------
+# Test::Nginx black-box suite (t/basic.t). Needs the dynamic module + a real
+# binary, so skip on asan (no module built) and module-only modes. Soft-skip
+# if Test::Nginx / prove are absent so a bare dev box still builds.
+# NOTE: Test::Nginx injects its own Host header; pass extra request headers via
+# `--- more_headers`, NOT a raw `--- request eval` (that yields a dup-Host
+# anomaly and skews the score). See t/basic.t header comment.
+# ---------------------------------------------------------------------------
+if [ "$MODE" != "asan" ] && [ "$MODE" != "module" ]; then
+    if command -v prove >/dev/null 2>&1 \
+       && perl -MTest::Nginx::Socket -e1 >/dev/null 2>&1; then
+        echo "[ci-build] running t/basic.t (Test::Nginx)"
+        # Test::Nginx derives servroot from the .t file's dir, which for an
+        # out-of-tree binary can resolve under the (non-writable / absent)
+        # build tree. Pin it to a writable path next to the test file.
+        SERVROOT="$MODULE_DIR/t/servroot"
+        rm -rf "$SERVROOT"
+        TEST_NGINX_BINARY="$ROOT/$DIR/objs/$BINARY" \
+        TEST_NGINX_SERVROOT="$SERVROOT" \
+        TEST_NGINX_LOAD_MODULES="$ROOT/$DIR/objs/ngx_http_sentinel_module.so" \
+        prove "$MODULE_DIR/t/basic.t"
+    else
+        echo "[ci-build] SKIP t/basic.t (prove / Test::Nginx not installed)"
+    fi
+fi

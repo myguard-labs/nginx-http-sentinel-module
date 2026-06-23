@@ -87,7 +87,7 @@ static ngx_command_t ngx_sentinel_commands[] = {
 
     /* sentinel on|off; — location context */
     { ngx_string("sentinel"),
-      NGX_HTTP_LOC_CONF | NGX_CONF_FLAG,
+      NGX_HTTP_MAIN_CONF | NGX_HTTP_SRV_CONF | NGX_HTTP_LOC_CONF | NGX_CONF_FLAG,
       ngx_conf_set_flag_slot,
       NGX_HTTP_LOC_CONF_OFFSET,
       offsetof(ngx_sentinel_loc_conf_t, enabled),
@@ -95,7 +95,7 @@ static ngx_command_t ngx_sentinel_commands[] = {
 
     /* sentinel_mode shadow|enforce; — location context */
     { ngx_string("sentinel_mode"),
-      NGX_HTTP_LOC_CONF | NGX_CONF_TAKE1,
+      NGX_HTTP_MAIN_CONF | NGX_HTTP_SRV_CONF | NGX_HTTP_LOC_CONF | NGX_CONF_TAKE1,
       ngx_sentinel_set_mode,
       NGX_HTTP_LOC_CONF_OFFSET,
       0,
@@ -111,7 +111,7 @@ static ngx_command_t ngx_sentinel_commands[] = {
 
     /* sentinel_fail open|closed; — location context */
     { ngx_string("sentinel_fail"),
-      NGX_HTTP_LOC_CONF | NGX_CONF_TAKE1,
+      NGX_HTTP_MAIN_CONF | NGX_HTTP_SRV_CONF | NGX_HTTP_LOC_CONF | NGX_CONF_TAKE1,
       ngx_sentinel_set_fail,
       NGX_HTTP_LOC_CONF_OFFSET,
       0,
@@ -119,7 +119,7 @@ static ngx_command_t ngx_sentinel_commands[] = {
 
     /* sentinel_threshold challenge=N tarpit=M block=K; — location context */
     { ngx_string("sentinel_threshold"),
-      NGX_HTTP_LOC_CONF | NGX_CONF_1MORE,
+      NGX_HTTP_MAIN_CONF | NGX_HTTP_SRV_CONF | NGX_HTTP_LOC_CONF | NGX_CONF_1MORE,
       ngx_sentinel_set_threshold,
       NGX_HTTP_LOC_CONF_OFFSET,
       0,
@@ -127,7 +127,7 @@ static ngx_command_t ngx_sentinel_commands[] = {
 
     /* sentinel_weight_errrate N; — per error event in burst window */
     { ngx_string("sentinel_weight_errrate"),
-      NGX_HTTP_LOC_CONF | NGX_CONF_TAKE1,
+      NGX_HTTP_MAIN_CONF | NGX_HTTP_SRV_CONF | NGX_HTTP_LOC_CONF | NGX_CONF_TAKE1,
       ngx_conf_set_num_slot,
       NGX_HTTP_LOC_CONF_OFFSET,
       offsetof(ngx_sentinel_loc_conf_t, weights.errrate),
@@ -135,7 +135,7 @@ static ngx_command_t ngx_sentinel_commands[] = {
 
     /* sentinel_weight_blocked N; — identity already blocked */
     { ngx_string("sentinel_weight_blocked"),
-      NGX_HTTP_LOC_CONF | NGX_CONF_TAKE1,
+      NGX_HTTP_MAIN_CONF | NGX_HTTP_SRV_CONF | NGX_HTTP_LOC_CONF | NGX_CONF_TAKE1,
       ngx_conf_set_num_slot,
       NGX_HTTP_LOC_CONF_OFFSET,
       offsetof(ngx_sentinel_loc_conf_t, weights.blocked),
@@ -143,7 +143,7 @@ static ngx_command_t ngx_sentinel_commands[] = {
 
     /* sentinel_weight_scanner N; — scanner-path prefix hit */
     { ngx_string("sentinel_weight_scanner"),
-      NGX_HTTP_LOC_CONF | NGX_CONF_TAKE1,
+      NGX_HTTP_MAIN_CONF | NGX_HTTP_SRV_CONF | NGX_HTTP_LOC_CONF | NGX_CONF_TAKE1,
       ngx_conf_set_num_slot,
       NGX_HTTP_LOC_CONF_OFFSET,
       offsetof(ngx_sentinel_loc_conf_t, weights.scanner),
@@ -151,7 +151,7 @@ static ngx_command_t ngx_sentinel_commands[] = {
 
     /* sentinel_weight_bot N; — heuristic bot user-agent */
     { ngx_string("sentinel_weight_bot"),
-      NGX_HTTP_LOC_CONF | NGX_CONF_TAKE1,
+      NGX_HTTP_MAIN_CONF | NGX_HTTP_SRV_CONF | NGX_HTTP_LOC_CONF | NGX_CONF_TAKE1,
       ngx_conf_set_num_slot,
       NGX_HTTP_LOC_CONF_OFFSET,
       offsetof(ngx_sentinel_loc_conf_t, weights.bot),
@@ -159,7 +159,7 @@ static ngx_command_t ngx_sentinel_commands[] = {
 
     /* sentinel_weight_header N; — request-header anomaly */
     { ngx_string("sentinel_weight_header"),
-      NGX_HTTP_LOC_CONF | NGX_CONF_TAKE1,
+      NGX_HTTP_MAIN_CONF | NGX_HTTP_SRV_CONF | NGX_HTTP_LOC_CONF | NGX_CONF_TAKE1,
       ngx_conf_set_num_slot,
       NGX_HTTP_LOC_CONF_OFFSET,
       offsetof(ngx_sentinel_loc_conf_t, weights.header),
@@ -167,7 +167,7 @@ static ngx_command_t ngx_sentinel_commands[] = {
 
     /* sentinel_weight_honeypot N; — decoy-URL (honeypot) hit */
     { ngx_string("sentinel_weight_honeypot"),
-      NGX_HTTP_LOC_CONF | NGX_CONF_TAKE1,
+      NGX_HTTP_MAIN_CONF | NGX_HTTP_SRV_CONF | NGX_HTTP_LOC_CONF | NGX_CONF_TAKE1,
       ngx_conf_set_num_slot,
       NGX_HTTP_LOC_CONF_OFFSET,
       offsetof(ngx_sentinel_loc_conf_t, weights.honeypot),
@@ -183,7 +183,7 @@ static ngx_command_t ngx_sentinel_commands[] = {
 
     /* sentinel_weight_velocity N; — added once if velocity_exceeded */
     { ngx_string("sentinel_weight_velocity"),
-      NGX_HTTP_LOC_CONF | NGX_CONF_TAKE1,
+      NGX_HTTP_MAIN_CONF | NGX_HTTP_SRV_CONF | NGX_HTTP_LOC_CONF | NGX_CONF_TAKE1,
       ngx_conf_set_num_slot,
       NGX_HTTP_LOC_CONF_OFFSET,
       offsetof(ngx_sentinel_loc_conf_t, weights.velocity),
@@ -209,7 +209,7 @@ static ngx_command_t ngx_sentinel_commands[] = {
 
     /* sentinel_tarpit_max_conns N;  default 256; 0=disabled (all TARPIT->444) */
     { ngx_string("sentinel_tarpit_max_conns"),
-      NGX_HTTP_LOC_CONF | NGX_CONF_TAKE1,
+      NGX_HTTP_MAIN_CONF | NGX_HTTP_SRV_CONF | NGX_HTTP_LOC_CONF | NGX_CONF_TAKE1,
       ngx_conf_set_num_slot,
       NGX_HTTP_LOC_CONF_OFFSET,
       offsetof(ngx_sentinel_loc_conf_t, tarpit_max_conns),
@@ -217,7 +217,7 @@ static ngx_command_t ngx_sentinel_commands[] = {
 
     /* sentinel_tarpit_delay ms;  default 5000; bounds [100, 60000] */
     { ngx_string("sentinel_tarpit_delay"),
-      NGX_HTTP_LOC_CONF | NGX_CONF_TAKE1,
+      NGX_HTTP_MAIN_CONF | NGX_HTTP_SRV_CONF | NGX_HTTP_LOC_CONF | NGX_CONF_TAKE1,
       ngx_sentinel_set_tarpit_delay,
       NGX_HTTP_LOC_CONF_OFFSET,
       0,
@@ -225,7 +225,7 @@ static ngx_command_t ngx_sentinel_commands[] = {
 
     /* sentinel_tarpit_bytes N;  default 1024; bounds [1, 65536] */
     { ngx_string("sentinel_tarpit_bytes"),
-      NGX_HTTP_LOC_CONF | NGX_CONF_TAKE1,
+      NGX_HTTP_MAIN_CONF | NGX_HTTP_SRV_CONF | NGX_HTTP_LOC_CONF | NGX_CONF_TAKE1,
       ngx_sentinel_set_tarpit_bytes,
       NGX_HTTP_LOC_CONF_OFFSET,
       0,
@@ -233,7 +233,7 @@ static ngx_command_t ngx_sentinel_commands[] = {
 
     /* sentinel_tarpit_max_lifetime ms;  default 30000; bounds [1000, 600000] */
     { ngx_string("sentinel_tarpit_max_lifetime"),
-      NGX_HTTP_LOC_CONF | NGX_CONF_TAKE1,
+      NGX_HTTP_MAIN_CONF | NGX_HTTP_SRV_CONF | NGX_HTTP_LOC_CONF | NGX_CONF_TAKE1,
       ngx_sentinel_set_tarpit_lifetime,
       NGX_HTTP_LOC_CONF_OFFSET,
       0,
@@ -251,7 +251,7 @@ static ngx_command_t ngx_sentinel_commands[] = {
 
     /* sentinel_crowdsec_feed path; — location: feed file (off if unset) */
     { ngx_string("sentinel_crowdsec_feed"),
-      NGX_HTTP_LOC_CONF | NGX_CONF_TAKE1,
+      NGX_HTTP_MAIN_CONF | NGX_HTTP_SRV_CONF | NGX_HTTP_LOC_CONF | NGX_CONF_TAKE1,
       ngx_sentinel_set_crowdsec_feed,
       NGX_HTTP_LOC_CONF_OFFSET,
       0,
@@ -259,7 +259,7 @@ static ngx_command_t ngx_sentinel_commands[] = {
 
     /* sentinel_crowdsec_interval time; — refresh tick (default 10s) */
     { ngx_string("sentinel_crowdsec_interval"),
-      NGX_HTTP_LOC_CONF | NGX_CONF_TAKE1,
+      NGX_HTTP_MAIN_CONF | NGX_HTTP_SRV_CONF | NGX_HTTP_LOC_CONF | NGX_CONF_TAKE1,
       ngx_conf_set_sec_slot,
       NGX_HTTP_LOC_CONF_OFFSET,
       offsetof(ngx_sentinel_loc_conf_t, cs_interval),
@@ -267,7 +267,7 @@ static ngx_command_t ngx_sentinel_commands[] = {
 
     /* sentinel_crowdsec_default_ttl time; — TTL for expiry==0 lines */
     { ngx_string("sentinel_crowdsec_default_ttl"),
-      NGX_HTTP_LOC_CONF | NGX_CONF_TAKE1,
+      NGX_HTTP_MAIN_CONF | NGX_HTTP_SRV_CONF | NGX_HTTP_LOC_CONF | NGX_CONF_TAKE1,
       ngx_conf_set_sec_slot,
       NGX_HTTP_LOC_CONF_OFFSET,
       offsetof(ngx_sentinel_loc_conf_t, cs_default_ttl),
@@ -275,7 +275,7 @@ static ngx_command_t ngx_sentinel_commands[] = {
 
     /* sentinel_crowdsec_stale_after time; — stale threshold + LRU age-out */
     { ngx_string("sentinel_crowdsec_stale_after"),
-      NGX_HTTP_LOC_CONF | NGX_CONF_TAKE1,
+      NGX_HTTP_MAIN_CONF | NGX_HTTP_SRV_CONF | NGX_HTTP_LOC_CONF | NGX_CONF_TAKE1,
       ngx_conf_set_sec_slot,
       NGX_HTTP_LOC_CONF_OFFSET,
       offsetof(ngx_sentinel_loc_conf_t, cs_stale_after),
@@ -283,7 +283,7 @@ static ngx_command_t ngx_sentinel_commands[] = {
 
     /* sentinel_crowdsec_max_bytes size; — feed size cap */
     { ngx_string("sentinel_crowdsec_max_bytes"),
-      NGX_HTTP_LOC_CONF | NGX_CONF_TAKE1,
+      NGX_HTTP_MAIN_CONF | NGX_HTTP_SRV_CONF | NGX_HTTP_LOC_CONF | NGX_CONF_TAKE1,
       ngx_conf_set_size_slot,
       NGX_HTTP_LOC_CONF_OFFSET,
       offsetof(ngx_sentinel_loc_conf_t, cs_max_bytes),
@@ -291,7 +291,7 @@ static ngx_command_t ngx_sentinel_commands[] = {
 
     /* sentinel_weight_crowdsec N; — base score weight for a crowdsec ban */
     { ngx_string("sentinel_weight_crowdsec"),
-      NGX_HTTP_LOC_CONF | NGX_CONF_TAKE1,
+      NGX_HTTP_MAIN_CONF | NGX_HTTP_SRV_CONF | NGX_HTTP_LOC_CONF | NGX_CONF_TAKE1,
       ngx_conf_set_num_slot,
       NGX_HTTP_LOC_CONF_OFFSET,
       offsetof(ngx_sentinel_loc_conf_t, weights.crowdsec),

@@ -1,3 +1,8 @@
+# GOTCHA: Test::Nginx injects its own Host header. To add request headers, use
+# `--- more_headers`, NOT a raw `--- request eval "GET ... Host: ..."` — the raw
+# form duplicates Host, which the sentinel header-anomaly signal flags (dup-Host),
+# inflating $sentinel_score and flipping verdict to challenge. The dynamic module
+# is loaded via the TEST_NGINX_LOAD_MODULES env var (set by tools/ci-build.sh).
 use Test::Nginx::Socket 'no_plan';
 
 repeat_each(1);
@@ -6,7 +11,7 @@ run_tests();
 
 __DATA__
 
-=== TEST 1: shadow mode allows all requests and sets variables
+=== TEST 1: shadow mode allows a clean browser-like request and sets variables
 --- http_config
     sentinel_zone test:1m;
 --- config
@@ -20,6 +25,9 @@ __DATA__
     }
 --- request
 GET /ok
+--- more_headers
+User-Agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36
+Accept: text/html
 --- response_headers_like
 X-Score: \d+
 X-Verdict: allow
@@ -36,23 +44,25 @@ X-JA4H: [0-9a-f]{24}
 GET /off
 --- error_code: 200
 
-=== TEST 3: shadow mode with bot UA still allows (score stub = 0)
+=== TEST 3: shadow mode scores a bot UA but never blocks (shadow = observe only)
 --- http_config
     sentinel_zone test:1m;
 --- config
     sentinel on;
     sentinel_mode shadow;
+    add_header X-Score   $sentinel_score;
     add_header X-Verdict $sentinel_verdict;
     location = /bot {
         return 200 "ok";
     }
 --- request eval
 "GET /bot HTTP/1.0\r\nHost: localhost\r\nUser-Agent: sqlmap/1.0\r\nConnection: close\r\n\r\n"
---- response_headers
-X-Verdict: allow
+# Bot UA + missing Accept => non-zero score; shadow mode still returns 200.
+--- response_headers_like
+X-Score: [1-9][0-9]*
 --- error_code: 200
 
-=== TEST 4: enforce mode with score=0 still allows (stub returns 0)
+=== TEST 4: enforce mode lets a clean browser-like request through
 --- http_config
     sentinel_zone test:1m;
 --- config
@@ -64,6 +74,9 @@ X-Verdict: allow
     }
 --- request
 GET /enforce
+--- more_headers
+User-Agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36
+Accept: text/html
 --- response_headers
 X-Verdict: allow
 --- error_code: 200
@@ -116,3 +129,34 @@ GET /velunbound
 --- response_headers
 X-Velocity: 0
 --- error_code: 200
+
+=== TEST 8: unknown velocity zone name is rejected at config load
+--- http_config
+    sentinel_zone test:1m;
+    sentinel_velocity_zone veltest:1m rate=10 window=5;
+--- config
+    sentinel on;
+    sentinel_mode shadow;
+    sentinel_velocity nosuchzone;
+    location = /velbad {
+        return 200 "ok";
+    }
+--- must_die
+--- error_log
+sentinel_velocity: unknown velocity zone "nosuchzone"
+
+=== TEST 9: child loc with bad zone name does not silently inherit parent binding
+--- http_config
+    sentinel_zone test:1m;
+    sentinel_velocity_zone veltest:1m rate=10 window=5;
+--- config
+    sentinel on;
+    sentinel_mode shadow;
+    sentinel_velocity veltest;
+    location = /velchild {
+        sentinel_velocity nosuchzone;
+        return 200 "ok";
+    }
+--- must_die
+--- error_log
+sentinel_velocity: unknown velocity zone "nosuchzone"
