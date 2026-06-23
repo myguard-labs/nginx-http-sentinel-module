@@ -164,6 +164,23 @@ http {{
             return 200 "header";
         }}
 
+        # Honeypot: /honeypot-test/trap is a decoy prefix (matched against the
+        # full r->uri); /honeypot-test/safe is a normal path.
+        # Zero all other weights so the only score delta is w_honeypot (90).
+        location /honeypot-test {{
+            sentinel on;
+            sentinel_mode shadow;
+            sentinel_honeypot /honeypot-test/trap;
+            sentinel_weight_errrate 0;
+            sentinel_weight_blocked 0;
+            sentinel_weight_scanner 0;
+            sentinel_weight_bot 0;
+            sentinel_weight_header 0;
+            sentinel_weight_honeypot 90;
+            access_log {root}/logs/honeypot.log sentinelvars;
+            return 200 "honeypot";
+        }}
+
         # Phase 2 - tarpit: enforce mode, forced TARPIT via high bot score.
         # sqlmap UA triggers bot signal; errrate deliberately not needed here
         # since bot weight alone should be >= tarpit threshold (default 60).
@@ -841,6 +858,33 @@ def main() -> int:
                     f"header-anomaly: bare request must exceed clean control by "
                     f">= 25 (weight_header); got bare={anomalous_score} "
                     f"clean={clean_score}")
+
+            # TEST 7: honeypot — a request to /trap must yield $sentinel_honeypot=1
+            # and score == 90 (w_honeypot); a request to /safe must give
+            # $sentinel_honeypot=0 and score == 0 (all other weights are zeroed).
+            fetch(args.port, "/honeypot-test/trap")
+            fetch(args.port, "/honeypot-test/safe")
+            time.sleep(0.3)
+
+            honeypot_log = root / "server" / "logs" / "honeypot.log"
+            if not honeypot_log.exists():
+                raise AssertionError("honeypot.log not written")
+            hplines = [ln.split() for ln in
+                       honeypot_log.read_text(encoding="utf-8").splitlines()
+                       if ln.strip()]
+            if len(hplines) < 2:
+                raise AssertionError(
+                    f"honeypot.log: expected >= 2 lines, got {len(hplines)}")
+            # First line is /trap (honeypot hit); second is /safe (miss).
+            trap_score  = int(hplines[0][1])
+            safe_score  = int(hplines[1][1])
+            if trap_score < 90:
+                raise AssertionError(
+                    f"honeypot: /trap score must be >= 90 (w_honeypot); "
+                    f"got {trap_score}")
+            if safe_score != 0:
+                raise AssertionError(
+                    f"honeypot: /safe score must be 0; got {safe_score}")
 
             nginx.stop()
             nginx.assert_clean_logs()

@@ -51,6 +51,9 @@ static char *ngx_sentinel_set_crowdsec_zone(ngx_conf_t *cf,
 static char *ngx_sentinel_set_crowdsec_feed(ngx_conf_t *cf,
     ngx_command_t *cmd, void *conf);
 
+static char *sentinel_conf_honeypot(ngx_conf_t *cf,
+    ngx_command_t *cmd, void *conf);
+
 static ngx_int_t ngx_sentinel_init_process(ngx_cycle_t *cycle);
 static ngx_int_t ngx_sentinel_init_tarpit_shm(ngx_conf_t *cf,
     ngx_sentinel_main_conf_t *mcf);
@@ -64,6 +67,8 @@ static ngx_int_t ngx_sentinel_var_verdict(ngx_http_request_t *r,
 static ngx_int_t ngx_sentinel_var_ja4h(ngx_http_request_t *r,
     ngx_http_variable_value_t *v, uintptr_t data);
 static ngx_int_t ngx_sentinel_var_header(ngx_http_request_t *r,
+    ngx_http_variable_value_t *v, uintptr_t data);
+static ngx_int_t ngx_sentinel_var_honeypot(ngx_http_request_t *r,
     ngx_http_variable_value_t *v, uintptr_t data);
 
 static ngx_sentinel_ctx_t *ngx_sentinel_get_ctx(ngx_http_request_t *r);
@@ -152,6 +157,22 @@ static ngx_command_t ngx_sentinel_commands[] = {
       ngx_conf_set_num_slot,
       NGX_HTTP_LOC_CONF_OFFSET,
       offsetof(ngx_sentinel_loc_conf_t, weights.header),
+      NULL },
+
+    /* sentinel_weight_honeypot N; — decoy-URL (honeypot) hit */
+    { ngx_string("sentinel_weight_honeypot"),
+      NGX_HTTP_LOC_CONF | NGX_CONF_TAKE1,
+      ngx_conf_set_num_slot,
+      NGX_HTTP_LOC_CONF_OFFSET,
+      offsetof(ngx_sentinel_loc_conf_t, weights.honeypot),
+      NULL },
+
+    /* sentinel_honeypot <path> [path ...]; — decoy path prefix(es) */
+    { ngx_string("sentinel_honeypot"),
+      NGX_HTTP_MAIN_CONF | NGX_HTTP_SRV_CONF | NGX_HTTP_LOC_CONF | NGX_CONF_1MORE,
+      sentinel_conf_honeypot,
+      NGX_HTTP_LOC_CONF_OFFSET,
+      0,
       NULL },
 
     /* ---- Phase 2: tarpit directives ---- */
@@ -304,6 +325,9 @@ static ngx_http_variable_t ngx_sentinel_vars[] = {
     { ngx_string("sentinel_header_anomaly"), NULL,
       ngx_sentinel_var_header,  0, NGX_HTTP_VAR_NOCACHEABLE, 0 },
 
+    { ngx_string("sentinel_honeypot"), NULL,
+      ngx_sentinel_var_honeypot, 0, NGX_HTTP_VAR_NOCACHEABLE, 0 },
+
     { ngx_null_string, NULL, NULL, 0, 0, 0 }
 };
 
@@ -356,6 +380,7 @@ ngx_sentinel_get_ctx(ngx_http_request_t *r)
     sentinel_errrate_signal(r, lcf, &ctx->inputs);
     sentinel_botua_signal(r, &ctx->inputs);
     sentinel_header_signal(r, &ctx->inputs);
+    sentinel_honeypot_signal(r, lcf, &ctx->inputs);
     sentinel_crowdsec_signal(r, lcf, &ctx->inputs);
 
     /* Score + verdict (stub returns 0 -> always allow). */
@@ -470,6 +495,27 @@ ngx_sentinel_var_header(ngx_http_request_t *r, ngx_http_variable_value_t *v,
     return NGX_OK;
 }
 
+static ngx_int_t
+ngx_sentinel_var_honeypot(ngx_http_request_t *r, ngx_http_variable_value_t *v,
+    uintptr_t data)
+{
+    ngx_sentinel_ctx_t  *ctx;
+
+    ctx = ngx_sentinel_get_ctx(r);
+    if (ctx == NULL) {
+        v->not_found = 1;
+        return NGX_OK;
+    }
+
+    v->len  = 1;
+    v->data = (u_char *) (ctx->inputs.honeypot ? "1" : "0");
+    v->valid  = 1;
+    v->not_found   = 0;
+    v->no_cacheable = 0;
+
+    return NGX_OK;
+}
+
 /* -------------------------------------------------------------------------
  * PREACCESS handler
  * ---------------------------------------------------------------------- */
@@ -499,7 +545,7 @@ ngx_sentinel_preaccess_handler(ngx_http_request_t *r)
     ngx_log_error(NGX_LOG_INFO, r->connection->log, 0,
                   "sentinel: score=%i verdict=%s ja4h=%s "
                   "shadow=%i errrate=%ui bot=%i scanner=%i header=%i "
-                  "crowdsec=%i cs_action=%ui",
+                  "honeypot=%i crowdsec=%i cs_action=%ui",
                   ctx->score,
                   verdict_strings[ctx->verdict],
                   ctx->inputs.ja4h,
@@ -508,6 +554,7 @@ ngx_sentinel_preaccess_handler(ngx_http_request_t *r)
                   (ngx_int_t) ctx->inputs.bot_ua,
                   (ngx_int_t) ctx->inputs.scanner_path,
                   (ngx_int_t) ctx->inputs.header_anomaly,
+                  (ngx_int_t) ctx->inputs.honeypot,
                   (ngx_int_t) ctx->inputs.crowdsec_hit,
                   (ngx_uint_t) ctx->inputs.crowdsec_action);
 
@@ -758,6 +805,7 @@ ngx_sentinel_create_loc_conf(ngx_conf_t *cf)
     lcf->weights.scanner = NGX_CONF_UNSET;
     lcf->weights.bot     = NGX_CONF_UNSET;
     lcf->weights.header  = NGX_CONF_UNSET;
+    lcf->weights.honeypot = NGX_CONF_UNSET;
     lcf->weights.crowdsec = NGX_CONF_UNSET;
 
     lcf->cs_zone         = NGX_CONF_UNSET_PTR;
@@ -809,6 +857,15 @@ ngx_sentinel_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
     ngx_conf_merge_value(conf->weights.header,
                          prev->weights.header,
                          NGX_SENTINEL_DEFAULT_W_HEADER);
+    ngx_conf_merge_value(conf->weights.honeypot,
+                         prev->weights.honeypot,
+                         NGX_SENTINEL_DEFAULT_W_HONEYPOT);
+
+    /* Inherit decoy_paths from parent if not set locally. */
+    if (conf->decoy_paths.nelts == 0 && prev->decoy_paths.nelts > 0) {
+        conf->decoy_paths = prev->decoy_paths;
+    }
+
     ngx_conf_merge_value(conf->weights.crowdsec,
                          prev->weights.crowdsec,
                          NGX_SENTINEL_DEFAULT_W_CROWDSEC);
@@ -1283,6 +1340,47 @@ ngx_sentinel_set_tarpit_lifetime(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
     }
 
     lcf->tarpit_max_lifetime = v;
+    return NGX_CONF_OK;
+}
+
+/* -------------------------------------------------------------------------
+ * Honeypot directive handler: push each path arg into lcf->decoy_paths.
+ * ---------------------------------------------------------------------- */
+
+static char *
+sentinel_conf_honeypot(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
+{
+    ngx_sentinel_loc_conf_t  *lcf = conf;
+    ngx_str_t                *value;
+    ngx_str_t                *slot;
+    ngx_uint_t                i;
+
+    value = cf->args->elts;
+
+    for (i = 1; i < cf->args->nelts; i++) {
+
+        if (value[i].len == 0) {
+            ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                               "sentinel_honeypot: empty path argument");
+            return NGX_CONF_ERROR;
+        }
+
+        if (lcf->decoy_paths.elts == NULL) {
+            if (ngx_array_init(&lcf->decoy_paths, cf->pool, 4,
+                               sizeof(ngx_str_t)) != NGX_OK)
+            {
+                return NGX_CONF_ERROR;
+            }
+        }
+
+        slot = ngx_array_push(&lcf->decoy_paths);
+        if (slot == NULL) {
+            return NGX_CONF_ERROR;
+        }
+
+        *slot = value[i];
+    }
+
     return NGX_CONF_OK;
 }
 
