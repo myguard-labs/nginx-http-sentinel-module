@@ -119,7 +119,7 @@ jobs:
                 -Wno-unused-parameter \
                 -I"$GITHUB_WORKSPACE/src" \
                 $incs "$src" \
-                -o /tmp/$(basename "$src" .c).o
+                -o "/tmp/$(basename "$src" .c).o"
             done
           )
 
