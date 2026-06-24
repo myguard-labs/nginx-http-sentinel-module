@@ -173,6 +173,7 @@ sentinel_velocity: unknown velocity zone "nosuchzone"
     add_header X-Crowdsec  $sentinel_crowdsec;
     add_header X-CsAction  $sentinel_crowdsec_action;
     add_header X-Throttled $sentinel_throttled;
+    add_header X-Shield    $sentinel_shield;
     add_header X-Asn       $sentinel_asn;
     add_header X-Coherence $sentinel_coherence;
     add_header X-Fcrdns    $sentinel_fcrdns;
@@ -191,6 +192,7 @@ X-Errrate: \d+
 X-Crowdsec: 0
 X-CsAction: none
 X-Throttled: 0
+X-Shield: 0
 X-Asn: 0
 X-Coherence: 0
 X-Fcrdns: pending
