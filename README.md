@@ -322,7 +322,8 @@ log_format sentinel_decision escape=json
     '"scanner":$sentinel_scanner,"bot":$sentinel_bot,'
     '"header_anomaly":$sentinel_header_anomaly,"honeypot":$sentinel_honeypot,'
     '"velocity":$sentinel_velocity,"allowlist":$sentinel_allowlist,'
-    '"crowdsec":$sentinel_crowdsec,"crowdsec_action":"$sentinel_crowdsec_action"}';
+    '"crowdsec":$sentinel_crowdsec,"crowdsec_action":"$sentinel_crowdsec_action",'
+    '"throttled":$sentinel_throttled}';
 
 server {
     sentinel on;

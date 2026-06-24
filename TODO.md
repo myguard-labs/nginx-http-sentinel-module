@@ -75,7 +75,8 @@ Each = own small PR. Full catalog + config examples: the pitch page (DESIGN.md l
 - [ ] actions: built-in proof-of-work challenge; cache-only origin-shield; tarpit maze mode; CrowdSec verdict feedback
 - [x] ops: TTL soft-bans — `sentinel_block_ttl S;` persists a self-ban (now+ttl) in the errrate zone on BLOCK/enforce; reuses errrate blocked_until → w_blocked re-block, no re-eval; fail-open if no zone; shadow never persists. Runtime TEST 11. PR #15, master 2026-06-24
 - [x] ops: per-route policy — all policy directives merge per-location via stock nginx inheritance (delivered by http/server/loc context widening); README section + runtime TEST 13 (same bot UA → strict=403, lax=200) lock the contract — PR, 2026-06-24
-- [ ] ops: allowlist (verified search engines + monitoring); metrics → VTS/statsd/OTel; structured decision log
+- [x] ops: structured decision log — 14 NOCACHEABLE vars + JSON log_format example (PR #12/#13); throttled-field finish (example + t/basic.t TEST 10 cover $sentinel_throttled) — PR, 2026-06-24
+- [ ] ops: allowlist (verified search engines + monitoring); metrics → VTS/statsd/OTel
 
 ## Deprecation — standalone error-abuse
 - [ ] after sentinel error-rate signal proven in prod: announce deprecation,
