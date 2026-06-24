@@ -192,6 +192,19 @@ passes.
 | `sentinel_tarpit_bytes N;` | `1024` | `1`–`65536` | Total bytes dripped before the response completes. |
 | `sentinel_tarpit_max_lifetime ms;` | `30000` | `1000`–`600000` | Hard ceiling on how long a tarpitted connection is held; force-closed at the deadline regardless of drip progress. |
 
+#### Throttle (instead of tarpit)
+
+| Directive | Default | Description |
+|---|---|---|
+| `sentinel_throttle_rate size;` | `0` (off) | On a `tarpit`-band verdict in `enforce` mode, **let the request through but cap egress at `size` bytes/sec** (e.g. `32k`) via nginx's native `r->limit_rate`, instead of dripping a tarpit trap. |
+
+When set (`> 0`), a `tarpit` verdict no longer opens a drip connection — the
+request is served normally with its body rate-limited by the core limiter (no
+extra timers, FDs, or connection cap; bounded entirely by nginx). Useful for
+suspected-but-not-certain scrapers where a hard tarpit/block is too aggressive:
+they get served, just slowly. `$sentinel_throttled` is `1` when applied. Only
+active in `enforce` mode; `0` keeps the default tarpit behaviour.
+
 ### Block (location / server / http context)
 
 When the verdict is `block`, the request is denied in the `PREACCESS` phase.
@@ -297,6 +310,7 @@ values computed in the `PREACCESS` phase.
 | `$sentinel_allowlist` | `0`/`1` | Client IP in a trusted CIDR |
 | `$sentinel_crowdsec` | `0`/`1` | IP present in the CrowdSec ban table |
 | `$sentinel_crowdsec_action` | token | `none` / `ban` / `captcha` / `throttle` |
+| `$sentinel_throttled` | `0`/`1` | Throttle action applied (tarpit verdict served with capped egress) |
 
 **Example — JSON decision log:**
 

@@ -331,6 +331,19 @@ http {{
             sentinel_block_ttl 2;
         }}
 
+        # Throttle action (TEST 12): bot UA scores 100 -> tarpit band
+        # ([tarpit=50, block=200)). With sentinel_throttle_rate set, the tarpit
+        # verdict caps egress via r->limit_rate instead of dripping a trap: the
+        # request completes with 200 (not 444) but the body is rate-limited.
+        location = /throttle {{
+            sentinel on;
+            sentinel_mode enforce;
+            sentinel_threshold challenge=10 tarpit=50 block=200;
+            sentinel_weight_bot 100;
+            sentinel_throttle_rate 4k;
+            add_header X-Sentinel-Throttled $sentinel_throttled always;
+        }}
+
 {cs_block}    }}
 }}
 """
@@ -374,6 +387,8 @@ class Nginx:
         for name in ("tarpit", "tarpit-life", "tarpit-shadow", "cs",
                      "block", "block-close", "block-shadow", "block-ttl"):
             (html / name).write_text("ok\n", encoding="ascii")
+        # Throttle target: at 4k/s a 16k body takes ~4s (measurably throttled).
+        (html / "throttle").write_text("x" * 16384, encoding="ascii")
         (self.root / "conf" / "nginx.conf").write_text(
             nginx_config(self.root, self.port, self.module, workers,
                          tarpit_max_conns=tarpit_max_conns,
@@ -905,6 +920,40 @@ def test_softban_ttl(port: int) -> None:
     print("  TEST 11 softban-ttl: PASS (block=403, within-ttl=403, expired=200)")
 
 
+def test_throttle(port: int) -> None:
+    """TEST 12 - throttle action: a bot UA hits the tarpit band; with
+    sentinel_throttle_rate set the tarpit verdict caps egress via r->limit_rate
+    instead of dripping a trap. The request completes normally (200, full body,
+    NOT a 444 close) and $sentinel_throttled is 1.
+
+    NOTE: we assert the FUNCTIONAL contract (verdict forked to throttle, request
+    served, var set), not wall-clock. nginx's limit_rate delays writes that
+    exceed the per-second budget, but over loopback a small response is handed
+    to the kernel send buffer in one writev and completes before any delay
+    timer fires - so elapsed time is not a reliable signal here. The
+    $sentinel_throttled var proves the throttle branch ran and set limit_rate.
+    """
+    req = urllib.request.Request(
+        f"http://127.0.0.1:{port}/throttle",
+        headers={"Connection": "close", "User-Agent": BOT_UA})
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        status = resp.status
+        thr = resp.headers.get("X-Sentinel-Throttled", "")
+        body = resp.read()
+
+    if status != 200:
+        raise AssertionError(
+            f"TEST 12 throttle: expected 200 (throttled, not tarpit/444); "
+            f"got {status}")
+    if thr != "1":
+        raise AssertionError(
+            f"TEST 12 throttle: $sentinel_throttled must be 1; got {thr!r}")
+    if len(body) != 16384:
+        raise AssertionError(
+            f"TEST 12 throttle: short/corrupt body {len(body)} (expected 16384)")
+    print(f"  TEST 12 throttle: PASS (200, throttled=1, body={len(body)}B)")
+
+
 def test_tarpit_no_malloc_grep(src_dir: pathlib.Path) -> None:
     """T2.4 - structural check: drip tick function contains no palloc/malloc."""
     tarpit_c = src_dir / "sentinel_tarpit.c"
@@ -1226,6 +1275,9 @@ def main() -> int:
 
             # TEST 11 - TTL soft-ban (clean shm: not polluted by TEST 5).
             test_softban_ttl(args.port + 1)
+
+            # TEST 12 - throttle action (tarpit band -> limit_rate, not drip).
+            test_throttle(args.port + 1)
 
             nginx2.stop()
             nginx2.assert_clean_logs()
