@@ -9,15 +9,12 @@ rules: `memory/eilandert/nginx-http-sentinel-module/workflow.md`.
 ## Phase 0 — Recon `[sonnet, investigator]`
 Self-contained module → recon maps code to **PORT**, not vars to read.
 Compressed file:line map, no fixes. One agent.
-- [ ] ssl-fingerprint: HOW it registers the ClientHello SSL callback (confirm
-      patch-free) + the JA4 byte-parse fn to port — file:line + fn names
-- [ ] error-abuse: error-rate/scanner-path counter logic + shmem counter shape
-      to absorb; tarpit/drip prior-art; CI harness files to copy
-- [ ] bot-verifier + user-agent: UA-parse + forward-confirmed-DNS verify fns to port
-- [ ] js-challenge: OPTIONAL soft handoff mechanism (redirect/named loc) — sentinel
-      has built-in PoW, this is just the optional bridge
-- [ ] shmem prior-art: rbtree+slab+TTL pattern from a sibling (error-abuse / dynamic-limit-req)
-- [ ] output = port map (what fn from where → which sentinel_*.c) → Phase 1 spec
+- [x] ssl-fingerprint: ClientHello cb + JA4 byte-parse — recon done, module shipped (Phase 1-3); JA4 itself deferred to Phase 4 line below
+- [x] error-abuse: error-rate/scanner-path counter + shmem shape absorbed → sentinel_errrate.c + sentinel_shm.c
+- [x] bot-verifier + user-agent: UA-parse → sentinel_botua.c; FCrDNS verify → sentinel_fcrdns.c (PR #22)
+- [x] js-challenge: superseded by built-in PoW (PR #23, sentinel_pow.c); optional bridge not needed
+- [x] shmem prior-art: rbtree+slab+TTL absorbed → sentinel_shm.c (errrate/velocity/softban/crowdsec/fcrdns zones)
+- [x] output = port map → delivered as the shipped module (all sentinel_*.c)
 
 ## Phase 1 — Skeleton + score + decide `PR #1`
 Static data only (ja4 blocklist file + in-module feed). Verdict = allow / 403 / challenge. No tarpit, no live CrowdSec. **All signals in-module.**
@@ -69,7 +66,7 @@ Each = own small PR. Full catalog + config examples: the pitch page (DESIGN.md l
 - [x] signal: velocity (request-rate per identity, reuses errrate shm ring; sentinel_velocity_zone name:size rate=/window=/block=; w_velocity 30) — PR #4, merged to dev 2026-06-23
 - [x] velocity: per-LOCATION vel_zone binding — `sentinel_velocity <zone>;` opt-in dir, auto-bind removed, inherits to nested loc — PR #5, dev 2026-06-23
 - [x] velocity: edge — child-loc bad zone name silently inherited parent binding. Fixed: clear vel_zone before name resolution → unknown name now rejected. Runtime T8b covers it — PR #6, dev 2026-06-23
-- [ ] test harness: t/basic.t (Test::Nginx) is non-functional — all tests die with "sentinel directive is not allowed here" (module never load_module'd by harness). Either wire %%TEST_NGINX_LOAD_MODULES%% / main_config load, or drop t/*.t and rely on tools/test_runtime.py (current authority). Coverage currently lives in test_runtime.py + t/test_score.c unit
+- [x] test harness: t/basic.t (Test::Nginx) WIRED + passing 30/30 — build-test.yml test-nginx job sets TEST_NGINX_LOAD_MODULES; coverage = test_runtime.py + t/test_score.c unit + t/basic.t (stale "non-functional" claim corrected)
 - [ ] signals: HTTP/2 frame-order fingerprint (needs core surface, traffic-gated)
 - [x] signals: datacenter/ASN (geoip2) — `sentinel_asn $geoip2_asn;` + `sentinel_datacenter_asn N...;`; reads complex value, no libmaxminddb link, w_asn 35, $sentinel_asn var. Runtime TEST 15. PR #20, master 2026-06-24
 - [x] signals: UA↔request-shape coherence — UA claims a mainstream browser but the request lacks a real browser's header shape (no Accept/Accept-Language/gzip Accept-Encoding, or pre-HTTP/1.1) → w_coherence 40; structural heuristic, NO JA4H hash DB; new sentinel_coherence.c + $sentinel_coherence var. Runtime TEST 16. PR #21, master 2026-06-24
@@ -102,17 +99,18 @@ Each = own small PR. Full catalog + config examples: the pitch page (DESIGN.md l
       error-abuse repo issues + sentinel HANDOFF.
 
 ## CI / valgrind / fuzz (Phase 1 sets up; all phases extend)
-- [ ] `[sonnet]` `.github/workflows`: build-test, codeql, security-scanners (copy autocert/error-abuse)
-- [ ] `[sonnet]` valgrind + fuzz workflows = `workflow_dispatch` (manual) + `schedule` **monthly** (remote)
-- [ ] `[sonnet]` local CI script (`tools/ci-build.sh` + `test_runtime.py` + asan) — run before EVERY dev commit
-- [ ] `[sonnet]` host cron: local valgrind **weekly** + longer soak session; mirror builder02 fuzz/valgrind/soak pattern → mail failures. Add to `host-config/crontabs/`.
-- [ ] test every fn + every bug we hit = a t/ test in same commit
+- [x] `[sonnet]` `.github/workflows`: build-test + security-scanners present; CodeQL DROPPED (PR #9 — private repo, no GHAS)
+- [x] `[sonnet]` valgrind + fuzz workflows = `workflow_dispatch` + `schedule` monthly (valgrind.yml, fuzzing.yml)
+- [x] `[sonnet]` local CI script — tools/ci-build.sh + test_runtime.py + asan exist
+- [ ] `[sonnet]` host cron: DEPLOY existing `host-config/crontabs/nginx-sentinel-weekly` (git-tracked) to /etc/cron.d/ — host act, user-gated
+- [x] test every fn + every bug we hit = a test in same commit (unit + runtime TEST n per PR)
 
 ## Packaging / cross-cutting
-- [ ] `[sonnet]` add `.github/workflows` — see CI section above
-- [ ] `[sonnet]` add to `/opt/packages/modules/nginx/` + enable via `/nginx-modules-enable` → `libnginx-mod-sentinel`
-- [ ] `[sonnet]` `/nginx-modules-synopsis` after merge — public page
-- [ ] README cross-links to siblings + stack pages
+- [x] `[sonnet]` `.github/workflows` — done (see CI section)
+- [x] `[sonnet]` added to `/opt/packages/modules/nginx/` + enabled → `libnginx-mod-http-sentinel` (superrepo 957af19a); geoip2 Recommends added 2026-06-25
+- [ ] `[sonnet]` `/nginx-modules-synopsis` — public page (+ synopsis→docker-README backlink) — USER-GATED outward
+- [ ] full build matrix + `UPLOAD=YES` → publish libnginx-mod-http-sentinel to PPA — USER-GATED outward
+- [x] README cross-links to siblings + stack pages (PR #10)
 
 ## Token economy
 - Recon = 1 compressed investigator
