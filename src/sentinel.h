@@ -48,6 +48,10 @@
 #define NGX_SENTINEL_DEFAULT_THRESH_TP 60
 #define NGX_SENTINEL_DEFAULT_THRESH_BK 80
 
+/* HTTP status returned for a BLOCK verdict in enforce mode.
+ * Special value 444 = drop the connection (NGX_HTTP_CLOSE). */
+#define NGX_SENTINEL_DEFAULT_BLOCK_STATUS 403
+
 /* Default score weights (tunable via sentinel_weight_* directives). */
 #define NGX_SENTINEL_DEFAULT_W_ERRRATE 1     /* per error event in burst window */
 #define NGX_SENTINEL_DEFAULT_W_BLOCKED 100   /* identity already blocked        */
@@ -295,6 +299,9 @@ typedef struct {
     ngx_int_t                tarpit_delay;        /* ms between drip ticks          */
     ngx_int_t                tarpit_bytes;        /* total bytes to drip (cap)      */
     ngx_int_t                tarpit_max_lifetime; /* hard force-close ceiling (ms)  */
+
+    /* BLOCK verdict enforcement: HTTP status to return (444 = close conn). */
+    ngx_int_t                block_status;
 } ngx_sentinel_loc_conf_t;
 
 /* -------------------------------------------------------------------------
