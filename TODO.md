@@ -72,7 +72,8 @@ Each = own small PR. Full catalog + config examples: the pitch page (DESIGN.md l
 - [ ] test harness: t/basic.t (Test::Nginx) is non-functional — all tests die with "sentinel directive is not allowed here" (module never load_module'd by harness). Either wire %%TEST_NGINX_LOAD_MODULES%% / main_config load, or drop t/*.t and rely on tools/test_runtime.py (current authority). Coverage currently lives in test_runtime.py + t/test_score.c unit
 - [ ] signals: HTTP/2 frame-order fingerprint; UA↔fingerprint coherence; datacenter/ASN (geoip2)
 - [ ] actions: built-in proof-of-work challenge; throttle (bandwidth-cap); cache-only origin-shield; tarpit maze mode; CrowdSec verdict feedback
-- [ ] ops: per-route policy; allowlist (verified search engines + monitoring); metrics → VTS/statsd/OTel; structured decision log; TTL soft-bans
+- [x] ops: TTL soft-bans — `sentinel_block_ttl S;` persists a self-ban (now+ttl) in the errrate zone on BLOCK/enforce; reuses errrate blocked_until → w_blocked re-block, no re-eval; fail-open if no zone; shadow never persists. Runtime TEST 11. PR #15, master 2026-06-24
+- [ ] ops: per-route policy; allowlist (verified search engines + monitoring); metrics → VTS/statsd/OTel; structured decision log
 
 ## Deprecation — standalone error-abuse
 - [ ] after sentinel error-rate signal proven in prod: announce deprecation,
