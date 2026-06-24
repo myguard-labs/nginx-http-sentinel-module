@@ -74,7 +74,8 @@ Each = own small PR. Full catalog + config examples: the pitch page (DESIGN.md l
 - [x] actions: throttle (bandwidth-cap) — `sentinel_throttle_rate size;` forks the TARPIT verdict (enforce) to cap egress via native r->limit_rate instead of dripping; $sentinel_throttled var. Runtime TEST 12. PR #16, master 2026-06-24
 - [ ] actions: built-in proof-of-work challenge; cache-only origin-shield; tarpit maze mode; CrowdSec verdict feedback
 - [x] ops: TTL soft-bans — `sentinel_block_ttl S;` persists a self-ban (now+ttl) in the errrate zone on BLOCK/enforce; reuses errrate blocked_until → w_blocked re-block, no re-eval; fail-open if no zone; shadow never persists. Runtime TEST 11. PR #15, master 2026-06-24
-- [ ] ops: per-route policy; allowlist (verified search engines + monitoring); metrics → VTS/statsd/OTel; structured decision log
+- [x] ops: per-route policy — all policy directives merge per-location via stock nginx inheritance (delivered by http/server/loc context widening); README section + runtime TEST 13 (same bot UA → strict=403, lax=200) lock the contract — PR, 2026-06-24
+- [ ] ops: allowlist (verified search engines + monitoring); metrics → VTS/statsd/OTel; structured decision log
 
 ## Deprecation — standalone error-abuse
 - [ ] after sentinel error-rate signal proven in prod: announce deprecation,

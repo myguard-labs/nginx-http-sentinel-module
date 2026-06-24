@@ -344,6 +344,24 @@ http {{
             add_header X-Sentinel-Throttled $sentinel_throttled always;
         }}
 
+        # Per-route policy (TEST 13): the SAME bot-UA identity (bot weight 100)
+        # gets opposite verdicts in two sibling locations, proving directives
+        # merge and override per-location via stock nginx inheritance. /route-strict
+        # blocks (block band crossed at 100); /route-lax neutralises the bot weight
+        # and lifts the band out of reach, so the identical request is allowed.
+        location = /route-strict {{
+            sentinel on;
+            sentinel_mode enforce;
+            sentinel_threshold challenge=10 tarpit=50 block=90;
+            sentinel_weight_bot 100;
+        }}
+        location = /route-lax {{
+            sentinel on;
+            sentinel_mode enforce;
+            sentinel_threshold challenge=900 tarpit=950 block=990;
+            sentinel_weight_bot 0;
+        }}
+
 {cs_block}    }}
 }}
 """
@@ -385,7 +403,8 @@ class Nginx:
         # Static targets for the tarpit/shadow/cs locations (served in the
         # CONTENT phase so PREACCESS — and the sentinel handler — runs).
         for name in ("tarpit", "tarpit-life", "tarpit-shadow", "cs",
-                     "block", "block-close", "block-shadow", "block-ttl"):
+                     "block", "block-close", "block-shadow", "block-ttl",
+                     "route-strict", "route-lax"):
             (html / name).write_text("ok\n", encoding="ascii")
         # Throttle target: at 4k/s a 16k body takes ~4s (measurably throttled).
         (html / "throttle").write_text("x" * 16384, encoding="ascii")
@@ -954,6 +973,25 @@ def test_throttle(port: int) -> None:
     print(f"  TEST 12 throttle: PASS (200, throttled=1, body={len(body)}B)")
 
 
+def test_per_route_policy(port: int) -> None:
+    """TEST 13 - per-route policy: the SAME bot-UA identity gets opposite
+    verdicts in two sibling locations, proving sentinel directives merge and
+    override per-location via stock nginx config inheritance.
+
+    /route-strict: block band at 90, bot weight 100 -> score 100 crosses block
+    -> 403 (enforce).
+    /route-lax:    bot weight 0 + block band lifted to 990 -> score 0 -> allow
+    -> 200.
+
+    Same request bytes (identical bot UA), different location = different policy.
+    """
+    expect_status(port, "/route-strict", 403,
+                  extra_headers={"User-Agent": BOT_UA})
+    expect_status(port, "/route-lax", 200,
+                  extra_headers={"User-Agent": BOT_UA})
+    print("  TEST 13 per-route-policy: PASS (strict=403, lax=200, same bot UA)")
+
+
 def test_tarpit_no_malloc_grep(src_dir: pathlib.Path) -> None:
     """T2.4 - structural check: drip tick function contains no palloc/malloc."""
     tarpit_c = src_dir / "sentinel_tarpit.c"
@@ -1229,6 +1267,10 @@ def main() -> int:
                     f"(status 0/444), got {close_status}")
             print("  TEST 10 block-enforce: PASS "
                   f"(block=403, shadow=200, close={close_status})")
+
+            # TEST 13: per-route policy — same bot UA, opposite verdicts in two
+            # sibling locations (strict blocks, lax allows).
+            test_per_route_policy(args.port)
 
             nginx.stop()
             nginx.assert_clean_logs()

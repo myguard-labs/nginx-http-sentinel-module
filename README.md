@@ -338,6 +338,60 @@ string for quick eyeballing.
 
 ---
 
+## Per-route policy
+
+Every sentinel directive is parsed in the `http`, `server` **and** `location`
+contexts and merges with stock nginx inheritance — a directive set in a
+`location {}` overrides the value inherited from `server`/`http`. There is no
+separate "policy" directive: you compose per-route behaviour out of the existing
+directives. This lets you run one global baseline and carve out exceptions
+per-route — a stricter policy on an admin path, a relaxed one on a health probe,
+shadow-only on a noisy API — without duplicating the whole config.
+
+```nginx
+http {
+    sentinel_zone reps:10m;
+
+    server {
+        # Baseline for the whole vhost.
+        sentinel on;
+        sentinel_mode enforce;
+        sentinel_zone reps:10m;
+        sentinel_threshold challenge=30 tarpit=60 block=80;
+
+        # Stricter: low block band, heavy bot weight -> bots blocked outright.
+        location /admin/ {
+            sentinel_threshold challenge=10 tarpit=50 block=90;
+            sentinel_weight_bot 100;
+        }
+
+        # Relaxed: never block here (lift the bands out of reach, drop bot weight).
+        location = /healthz {
+            sentinel_threshold challenge=900 tarpit=950 block=990;
+            sentinel_weight_bot 0;
+        }
+
+        # Observe only: score and log, never enforce, on a noisy API.
+        location /api/ {
+            sentinel_mode shadow;
+        }
+
+        # Disable entirely for a trusted internal callback.
+        location = /internal/cb {
+            sentinel off;
+        }
+    }
+}
+```
+
+The same client identity can therefore receive different verdicts on different
+routes within one request lifetime of the server — the policy is resolved from
+the matched location, not globally. (Shared-memory **zone declarations**
+— `sentinel_zone`, `sentinel_velocity_zone` — remain `http`-context only; only
+the per-request *policy* directives are location-overridable.)
+
+---
+
 ## Why one module
 
 All three are the same pipeline at one decision point (`PREACCESS`):
