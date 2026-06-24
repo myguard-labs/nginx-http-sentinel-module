@@ -84,6 +84,8 @@ static ngx_int_t ngx_sentinel_var_velocity(ngx_http_request_t *r,
     ngx_http_variable_value_t *v, uintptr_t data);
 static ngx_int_t ngx_sentinel_var_asn(ngx_http_request_t *r,
     ngx_http_variable_value_t *v, uintptr_t data);
+static ngx_int_t ngx_sentinel_var_coherence(ngx_http_request_t *r,
+    ngx_http_variable_value_t *v, uintptr_t data);
 static ngx_int_t ngx_sentinel_var_allowlist(ngx_http_request_t *r,
     ngx_http_variable_value_t *v, uintptr_t data);
 static ngx_int_t ngx_sentinel_var_bot(ngx_http_request_t *r,
@@ -217,6 +219,14 @@ static ngx_command_t ngx_sentinel_commands[] = {
       ngx_conf_set_num_slot,
       NGX_HTTP_LOC_CONF_OFFSET,
       offsetof(ngx_sentinel_loc_conf_t, weights.asn),
+      NULL },
+
+    /* sentinel_weight_coherence N; — added once if ua_incoherent */
+    { ngx_string("sentinel_weight_coherence"),
+      NGX_HTTP_MAIN_CONF | NGX_HTTP_SRV_CONF | NGX_HTTP_LOC_CONF | NGX_CONF_TAKE1,
+      ngx_conf_set_num_slot,
+      NGX_HTTP_LOC_CONF_OFFSET,
+      offsetof(ngx_sentinel_loc_conf_t, weights.coherence),
       NULL },
 
     /* sentinel_asn <variable>; — geoip2 ASN source variable (e.g. $geoip2_asn) */
@@ -452,6 +462,9 @@ static ngx_http_variable_t ngx_sentinel_vars[] = {
     { ngx_string("sentinel_asn"), NULL,
       ngx_sentinel_var_asn, 0, NGX_HTTP_VAR_NOCACHEABLE, 0 },
 
+    { ngx_string("sentinel_coherence"), NULL,
+      ngx_sentinel_var_coherence, 0, NGX_HTTP_VAR_NOCACHEABLE, 0 },
+
     { ngx_string("sentinel_allowlist"), NULL,
       ngx_sentinel_var_allowlist, 0, NGX_HTTP_VAR_NOCACHEABLE, 0 },
 
@@ -529,6 +542,7 @@ ngx_sentinel_get_ctx(ngx_http_request_t *r)
     sentinel_allowlist_signal(r, lcf, &ctx->inputs);
     sentinel_velocity_signal(r, lcf, &ctx->inputs);
     sentinel_asn_signal(r, lcf, &ctx->inputs);
+    sentinel_coherence_signal(r, &ctx->inputs);
     sentinel_crowdsec_signal(r, lcf, &ctx->inputs);
 
     /* Score + verdict (stub returns 0 -> always allow). */
@@ -699,6 +713,27 @@ ngx_sentinel_var_asn(ngx_http_request_t *r, ngx_http_variable_value_t *v,
 
     v->len  = 1;
     v->data = (u_char *) (ctx->inputs.datacenter_asn ? "1" : "0");
+    v->valid  = 1;
+    v->not_found   = 0;
+    v->no_cacheable = 0;
+
+    return NGX_OK;
+}
+
+static ngx_int_t
+ngx_sentinel_var_coherence(ngx_http_request_t *r, ngx_http_variable_value_t *v,
+    uintptr_t data)
+{
+    ngx_sentinel_ctx_t  *ctx;
+
+    ctx = ngx_sentinel_get_ctx(r);
+    if (ctx == NULL) {
+        v->not_found = 1;
+        return NGX_OK;
+    }
+
+    v->len  = 1;
+    v->data = (u_char *) (ctx->inputs.ua_incoherent ? "1" : "0");
     v->valid  = 1;
     v->not_found   = 0;
     v->no_cacheable = 0;
@@ -906,7 +941,7 @@ ngx_sentinel_preaccess_handler(ngx_http_request_t *r)
     ngx_log_error(NGX_LOG_INFO, r->connection->log, 0,
                   "sentinel: score=%i verdict=%s ja4h=%s "
                   "shadow=%i errrate=%ui bot=%i scanner=%i header=%i "
-                  "honeypot=%i velocity=%i asn=%i allowlist=%i crowdsec=%i cs_action=%ui",
+                  "honeypot=%i velocity=%i asn=%i coherence=%i allowlist=%i crowdsec=%i cs_action=%ui",
                   ctx->score,
                   verdict_strings[ctx->verdict],
                   ctx->inputs.ja4h,
@@ -918,6 +953,7 @@ ngx_sentinel_preaccess_handler(ngx_http_request_t *r)
                   (ngx_int_t) ctx->inputs.honeypot,
                   (ngx_int_t) ctx->inputs.velocity_exceeded,
                   (ngx_int_t) ctx->inputs.datacenter_asn,
+                  (ngx_int_t) ctx->inputs.ua_incoherent,
                   (ngx_int_t) ctx->inputs.allowlisted,
                   (ngx_int_t) ctx->inputs.crowdsec_hit,
                   (ngx_uint_t) ctx->inputs.crowdsec_action);
@@ -1245,6 +1281,7 @@ ngx_sentinel_create_loc_conf(ngx_conf_t *cf)
 
     /* asn_source NULL + asn_list empty via pcalloc; opt-in signal. */
     lcf->weights.asn     = NGX_CONF_UNSET;
+    lcf->weights.coherence = NGX_CONF_UNSET;
 
     lcf->cs_zone         = NGX_CONF_UNSET_PTR;
     lcf->cs_interval     = NGX_CONF_UNSET;
@@ -1308,6 +1345,9 @@ ngx_sentinel_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
     ngx_conf_merge_value(conf->weights.asn,
                          prev->weights.asn,
                          NGX_SENTINEL_DEFAULT_W_ASN);
+    ngx_conf_merge_value(conf->weights.coherence,
+                         prev->weights.coherence,
+                         NGX_SENTINEL_DEFAULT_W_COHERENCE);
     ngx_conf_merge_ptr_value(conf->vel_zone, prev->vel_zone, NULL);
 
     /* inherit velocity binding name from parent location */

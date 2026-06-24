@@ -400,6 +400,20 @@ http {{
             return 200 "asn";
         }}
 
+        # TEST 16 (coherence signal): shadow mode. weight_bot/velocity zeroed so
+        # the delta is purely the coherence term (default w_coherence 40). A UA
+        # that claims a browser (Chrome/...) but omits Accept/Accept-Language/
+        # gzip is incoherent; a fully browser-shaped request is coherent; a
+        # non-browser UA makes no coherence claim.
+        location = /coherence {{
+            sentinel on;
+            sentinel_mode shadow;
+            sentinel_weight_bot 0;
+            sentinel_weight_velocity 0;
+            access_log {root}/logs/coherence.log sentinelvars;
+            return 200 "coherence";
+        }}
+
 {cs_block}    }}
 }}
 """
@@ -1370,6 +1384,67 @@ def main() -> int:
                     f"by >= 35 (w_asn); got hit={asn_hit} miss={asn_miss}")
             print(f"  TEST 15 asn: PASS "
                   f"(hit={asn_hit}, miss={asn_miss}, none={asn_none})")
+
+            # TEST 16: coherence signal. A browser-claiming UA with a bare
+            # request (no Accept / Accept-Language / gzip) is incoherent and must
+            # score >= w_coherence (40) over a fully browser-shaped control. A
+            # non-browser UA makes no claim and must score equal to the coherent
+            # control. Raw sockets are required: urllib injects an Accept-Encoding
+            # header we cannot suppress, which would clear the incoherent case.
+            chrome_ua = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                         "AppleWebKit/537.36 (KHTML, like Gecko) "
+                         "Chrome/120.0.0.0 Safari/537.36")
+
+            def _raw_get(path: str, headers: list[str]) -> None:
+                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                s.connect(("127.0.0.1", args.port))
+                lines = [f"GET {path} HTTP/1.1",
+                         f"Host: 127.0.0.1:{args.port}"]
+                lines.extend(headers)
+                lines.append("Connection: close")
+                s.sendall(("\r\n".join(lines) + "\r\n\r\n").encode())
+                read_response_head(s)
+                s.close()
+
+            # (hit) browser UA, NO Accept/Accept-Language/Accept-Encoding.
+            _raw_get("/coherence", [f"User-Agent: {chrome_ua}"])
+            # (miss) browser UA, full browser request shape -> coherent.
+            _raw_get("/coherence", [
+                f"User-Agent: {chrome_ua}",
+                "Accept: text/html,application/xhtml+xml",
+                "Accept-Language: en-US,en;q=0.9",
+                "Accept-Encoding: gzip, deflate, br",
+            ])
+            # (none) non-browser UA -> makes no coherence claim.
+            _raw_get("/coherence", ["User-Agent: sentinel-ci/1.0"])
+            time.sleep(0.3)
+
+            coh_log = root / "server" / "logs" / "coherence.log"
+            if not coh_log.exists():
+                raise AssertionError("coherence.log not written")
+            cohlines = [ln.split() for ln in
+                        coh_log.read_text(encoding="utf-8").splitlines()
+                        if ln.strip()]
+            if len(cohlines) < 3:
+                raise AssertionError(
+                    f"coherence.log: expected >= 3 lines, got {len(cohlines)}")
+            coh_hit  = int(cohlines[0][1])   # incoherent browser-claim
+            coh_miss = int(cohlines[1][1])   # coherent browser
+            coh_none = int(cohlines[2][1])   # non-browser UA
+            # Shared 127.0.0.1 identity carries accumulated errrate; assert the
+            # incoherent DELTA over the coherent control, and that the coherent
+            # browser and the non-browser UA score equally (neither adds w_coh).
+            if coh_miss != coh_none:
+                raise AssertionError(
+                    f"TEST 16 coherence: coherent browser and non-browser UA "
+                    f"must score equally; got miss={coh_miss} none={coh_none}")
+            if coh_hit - coh_miss < 40:
+                raise AssertionError(
+                    f"TEST 16 coherence: incoherent browser-claim must exceed "
+                    f"the coherent control by >= 40 (w_coherence); "
+                    f"got hit={coh_hit} miss={coh_miss}")
+            print(f"  TEST 16 coherence: PASS "
+                  f"(hit={coh_hit}, miss={coh_miss}, none={coh_none})")
 
             # TEST 13: per-route policy — same bot UA, opposite verdicts in two
             # sibling locations (strict blocks, lax allows).
