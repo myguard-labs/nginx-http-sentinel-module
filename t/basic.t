@@ -172,6 +172,7 @@ sentinel_velocity: unknown velocity zone "nosuchzone"
     add_header X-Errrate   $sentinel_errrate;
     add_header X-Crowdsec  $sentinel_crowdsec;
     add_header X-CsAction  $sentinel_crowdsec_action;
+    add_header X-Throttled $sentinel_throttled;
     location = /.git/config {
         return 200 "decision";
     }
@@ -185,4 +186,5 @@ X-Scanner: 1
 X-Errrate: \d+
 X-Crowdsec: 0
 X-CsAction: none
+X-Throttled: 0
 --- error_code: 200
