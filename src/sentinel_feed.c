@@ -444,7 +444,7 @@ sentinel_feed_parse(ngx_sentinel_zone_t *zone, ngx_log_t *log,
                 key.len  = NGX_SENTINEL_DIGEST_LEN;
 
                 if (sentinel_shm_crowdsec_upsert(zone, &key, exp, act,
-                                                 generation, now) != NGX_OK)
+                                                 generation, now, 0) != NGX_OK)
                 {
                     ngx_log_error(NGX_LOG_WARN, log, 0,
                                   "sentinel: crowdsec zone full, partial load "

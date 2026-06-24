@@ -66,7 +66,7 @@ sentinel_shm_fcrdns_set(ngx_sentinel_zone_t *zone, ngx_str_t *key,
     /* generation 0: FCrDNS never sweeps by generation (TTL/LRU only). */
     {
         ngx_int_t rc = sentinel_shm_crowdsec_upsert(zone, key, now + ttl,
-                                                    (u_char) verdict, 0, now);
+                                                    (u_char) verdict, 0, now, 0);
         ngx_shmtx_unlock(&zone->shpool->mutex);
         return rc;
     }

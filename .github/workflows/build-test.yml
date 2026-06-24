@@ -81,7 +81,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            build-essential clang curl libpcre2-dev libssl-dev zlib1g-dev
+            build-essential clang curl libpcre2-dev libssl-dev zlib1g-dev \
+            libhiredis-dev
 
       - name: Cache source tarball
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
@@ -122,7 +123,8 @@ jobs:
               "$GITHUB_WORKSPACE/src/sentinel_asn.c" \
               "$GITHUB_WORKSPACE/src/sentinel_coherence.c" \
               "$GITHUB_WORKSPACE/src/sentinel_fcrdns.c" \
-              "$GITHUB_WORKSPACE/src/sentinel_pow.c"; do
+              "$GITHUB_WORKSPACE/src/sentinel_pow.c" \
+              "$GITHUB_WORKSPACE/src/sentinel_redis.c"; do
               "${{ matrix.cc }}" -c -fPIC $cflags \
                 -Wall -Wextra -Wshadow -Wstrict-prototypes \
                 -Wstrict-aliasing -Wunreachable-code -Werror \
@@ -163,6 +165,11 @@ jobs:
           name: nginx-mainline
           path: nginx-bin
 
+      - name: Install runtime dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libhiredis-dev
+
       - name: Run runtime suite
         run: |
           chmod +x nginx-bin/nginx
@@ -182,7 +189,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            build-essential curl libpcre2-dev libssl-dev zlib1g-dev
+            build-essential curl libpcre2-dev libssl-dev zlib1g-dev \
+            libhiredis-dev redis-server redis-tools
 
       - name: Build with sanitizers
         run: bash tools/ci-build.sh nginx "$NGINX_VERSION" asan
@@ -209,7 +217,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             build-essential curl libpcre2-dev libssl-dev zlib1g-dev \
-            cpanminus libio-socket-ssl-perl
+            libhiredis-dev cpanminus libio-socket-ssl-perl
           sudo cpanm --notest --quiet Test::Nginx
 
       - name: Build dynamic module
