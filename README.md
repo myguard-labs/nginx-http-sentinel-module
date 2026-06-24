@@ -360,6 +360,39 @@ suspected-but-not-certain scrapers where a hard tarpit/block is too aggressive:
 they get served, just slowly. `$sentinel_throttled` is `1` when applied. Only
 active in `enforce` mode; `0` keeps the default tarpit behaviour.
 
+#### Origin-shield (serve cache-only instead of tarpit)
+
+| Directive | Default | Description |
+|---|---|---|
+| `sentinel_shield on\|off;` | `off` | On a `tarpit`-band verdict in `enforce` mode, **let the request through but raise `$sentinel_shield=1`** instead of dripping a trap, so the operator's `proxy_*` block can serve the response **from cache / stale** and spare the origin. |
+
+A suspected scraper that hits the `tarpit` band still gets a response — but the
+operator decides it must come from cache, never a fresh origin fetch. Because at
+the `PREACCESS` phase the upstream/cache objects don't exist yet (and nginx's
+stale-cache directives take no variable), the module only **raises the signal**;
+you wire the enforcement in your proxy block. A typical recipe:
+
+```nginx
+# raise the flag when sentinel decides to shield
+sentinel_shield on;
+
+location / {
+    proxy_pass http://backend;
+    proxy_cache mycache;
+    # serve stale to shielded clients even while updating / on error,
+    # so a flagged scraper never reaches the origin
+    proxy_cache_use_stale updating error timeout;
+    proxy_cache_background_update on;
+    # never let a shielded request populate a fresh cache entry from origin
+    proxy_no_cache        $sentinel_shield;
+    proxy_cache_bypass    "";
+}
+```
+
+`$sentinel_shield` is `1` when applied. Only active in `enforce` mode. Throttle
+takes precedence: if `sentinel_throttle_rate > 0`, the throttle fork runs first
+and shield is not reached. `off` keeps the default tarpit behaviour.
+
 ### Block (location / server / http context)
 
 When the verdict is `block`, the request is denied in the `PREACCESS` phase.
@@ -519,6 +552,7 @@ values computed in the `PREACCESS` phase.
 | `$sentinel_crowdsec` | `0`/`1` | IP present in the CrowdSec ban table |
 | `$sentinel_crowdsec_action` | token | `none` / `ban` / `captcha` / `throttle` |
 | `$sentinel_throttled` | `0`/`1` | Throttle action applied (tarpit verdict served with capped egress) |
+| `$sentinel_shield` | `0`/`1` | Origin-shield action applied (tarpit verdict served cache-only by operator) |
 | `$sentinel_pow` | token | `off` / `challenge` (PoW page served) / `verified` (cookie or solution accepted) |
 
 **Example — JSON decision log:**

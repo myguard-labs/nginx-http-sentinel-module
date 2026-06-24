@@ -368,6 +368,21 @@ http {{
             add_header X-Sentinel-Throttled $sentinel_throttled always;
         }}
 
+        # Origin-shield action (TEST 19): bot UA scores 100 -> tarpit band.
+        # With sentinel_shield on, the tarpit verdict raises $sentinel_shield=1
+        # and lets the request proceed (served from the static file, not
+        # tarpitted/444) so the operator could serve cache-only. Serves a static
+        # file (content phase) rather than `return` so the preaccess dispatch
+        # actually runs (a `return` short-circuits in the rewrite phase).
+        location = /shield {{
+            sentinel on;
+            sentinel_mode enforce;
+            sentinel_threshold challenge=10 tarpit=50 block=200;
+            sentinel_weight_bot 100;
+            sentinel_shield on;
+            add_header X-Sentinel-Shield $sentinel_shield always;
+        }}
+
         # Per-route policy (TEST 13): the SAME bot-UA identity (bot weight 100)
         # gets opposite verdicts in two sibling locations, proving directives
         # merge and override per-location via stock nginx inheritance. /route-strict
@@ -499,6 +514,7 @@ class Nginx:
         (html / "pow").write_text("pow-ok", encoding="ascii")
         # Throttle target: at 4k/s a 16k body takes ~4s (measurably throttled).
         (html / "throttle").write_text("x" * 16384, encoding="ascii")
+        (html / "shield").write_text("shield-origin-ok", encoding="ascii")
         (self.root / "conf" / "nginx.conf").write_text(
             nginx_config(self.root, self.port, self.module, workers,
                          tarpit_max_conns=tarpit_max_conns,
@@ -1062,6 +1078,34 @@ def test_throttle(port: int) -> None:
         raise AssertionError(
             f"TEST 12 throttle: short/corrupt body {len(body)} (expected 16384)")
     print(f"  TEST 12 throttle: PASS (200, throttled=1, body={len(body)}B)")
+
+
+def test_shield(port: int) -> None:
+    """TEST 19 - origin-shield action: a bot UA hits the tarpit band; with
+    sentinel_shield on, the tarpit verdict raises $sentinel_shield=1 and lets
+    the request proceed (served from the static file, NOT tarpitted/444). The
+    module only raises the signal — the operator wires it into proxy cache
+    config — so we assert the FUNCTIONAL contract: 200, full body, shield=1.
+    """
+    req = urllib.request.Request(
+        f"http://127.0.0.1:{port}/shield",
+        headers={"Connection": "close", "User-Agent": BOT_UA})
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        status = resp.status
+        shd = resp.headers.get("X-Sentinel-Shield", "")
+        body = resp.read()
+
+    if status != 200:
+        raise AssertionError(
+            f"TEST 19 shield: expected 200 (shielded, not tarpit/444); "
+            f"got {status}")
+    if shd != "1":
+        raise AssertionError(
+            f"TEST 19 shield: $sentinel_shield must be 1; got {shd!r}")
+    if body != b"shield-origin-ok":
+        raise AssertionError(
+            f"TEST 19 shield: unexpected body {body!r}")
+    print("  TEST 19 shield: PASS (200, shield=1, origin served)")
 
 
 def test_pow_challenge(port: int) -> None:
@@ -1667,6 +1711,9 @@ def main() -> int:
 
             # TEST 12 - throttle action (tarpit band -> limit_rate, not drip).
             test_throttle(args.port + 1)
+
+            # TEST 19 - origin-shield action (tarpit band -> shield flag, served).
+            test_shield(args.port + 1)
 
             # TEST 14 - maze mode (tarpit drips HTML decoy links, not padding).
             test_tarpit_maze(args.port + 1)

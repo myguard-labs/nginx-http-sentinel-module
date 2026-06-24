@@ -279,6 +279,7 @@ typedef struct {
 
     unsigned                computed:1;  /* signals already gathered */
     unsigned                throttled:1; /* throttle action applied this request */
+    unsigned                shielded:1;  /* origin-shield action applied this request */
     unsigned                pow_state:2; /* ngx_sentinel_pow_state_e */
 } ngx_sentinel_ctx_t;
 
@@ -383,6 +384,14 @@ typedef struct {
      * dripping a trap, let the request proceed but cap egress at this many
      * bytes/sec via nginx's native r->limit_rate (0 = off, keep tarpit). */
     size_t                   throttle_rate;
+
+    /* Origin-shield action: on a TARPIT-band verdict in enforce mode, instead
+     * of tarpitting, let the request proceed but flag it ($sentinel_shield=1)
+     * so the operator's proxy block serves cache-only / stale and spares the
+     * origin. At PREACCESS the upstream/cache objects don't exist yet and
+     * nginx's stale-cache directives take no variable, so the module only
+     * raises the signal — the operator wires it (off = no shield). */
+    ngx_flag_t               shield;
 
     /* PoW challenge: on a CHALLENGE-band verdict in enforce mode, serve a
      * stateless hashcash puzzle and gate access behind a signed cookie. */
