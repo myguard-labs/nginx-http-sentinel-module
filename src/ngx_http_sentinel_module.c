@@ -100,6 +100,8 @@ static ngx_int_t ngx_sentinel_var_bot(ngx_http_request_t *r,
     ngx_http_variable_value_t *v, uintptr_t data);
 static ngx_int_t ngx_sentinel_var_throttled(ngx_http_request_t *r,
     ngx_http_variable_value_t *v, uintptr_t data);
+static ngx_int_t ngx_sentinel_var_pow(ngx_http_request_t *r,
+    ngx_http_variable_value_t *v, uintptr_t data);
 static ngx_int_t ngx_sentinel_var_scanner(ngx_http_request_t *r,
     ngx_http_variable_value_t *v, uintptr_t data);
 static ngx_int_t ngx_sentinel_var_errrate(ngx_http_request_t *r,
@@ -345,6 +347,38 @@ static ngx_command_t ngx_sentinel_commands[] = {
       offsetof(ngx_sentinel_loc_conf_t, throttle_rate),
       NULL },
 
+    /* sentinel_pow on|off;  serve a PoW challenge on CHALLENGE-band verdicts */
+    { ngx_string("sentinel_pow"),
+      NGX_HTTP_MAIN_CONF | NGX_HTTP_SRV_CONF | NGX_HTTP_LOC_CONF | NGX_CONF_FLAG,
+      ngx_conf_set_flag_slot,
+      NGX_HTTP_LOC_CONF_OFFSET,
+      offsetof(ngx_sentinel_loc_conf_t, pow_enabled),
+      NULL },
+
+    /* sentinel_pow_secret <key>;  HMAC signing key (required; empty = off) */
+    { ngx_string("sentinel_pow_secret"),
+      NGX_HTTP_MAIN_CONF | NGX_HTTP_SRV_CONF | NGX_HTTP_LOC_CONF | NGX_CONF_TAKE1,
+      ngx_conf_set_str_slot,
+      NGX_HTTP_LOC_CONF_OFFSET,
+      offsetof(ngx_sentinel_loc_conf_t, pow_secret),
+      NULL },
+
+    /* sentinel_pow_difficulty N;  required leading zero bits (default 16) */
+    { ngx_string("sentinel_pow_difficulty"),
+      NGX_HTTP_MAIN_CONF | NGX_HTTP_SRV_CONF | NGX_HTTP_LOC_CONF | NGX_CONF_TAKE1,
+      ngx_conf_set_num_slot,
+      NGX_HTTP_LOC_CONF_OFFSET,
+      offsetof(ngx_sentinel_loc_conf_t, pow_difficulty),
+      NULL },
+
+    /* sentinel_pow_ttl time;  challenge-bucket + bypass-cookie TTL (default 3600) */
+    { ngx_string("sentinel_pow_ttl"),
+      NGX_HTTP_MAIN_CONF | NGX_HTTP_SRV_CONF | NGX_HTTP_LOC_CONF | NGX_CONF_TAKE1,
+      ngx_conf_set_sec_slot,
+      NGX_HTTP_LOC_CONF_OFFSET,
+      offsetof(ngx_sentinel_loc_conf_t, pow_ttl),
+      NULL },
+
     /* ---- Phase 3: crowdsec decision-feed directives ---- */
 
     /* sentinel_crowdsec_zone name:size; — main context (declares the shm zone) */
@@ -516,6 +550,9 @@ static ngx_http_variable_t ngx_sentinel_vars[] = {
 
     { ngx_string("sentinel_throttled"), NULL,
       ngx_sentinel_var_throttled, 0, NGX_HTTP_VAR_NOCACHEABLE, 0 },
+
+    { ngx_string("sentinel_pow"), NULL,
+      ngx_sentinel_var_pow, 0, NGX_HTTP_VAR_NOCACHEABLE, 0 },
 
     { ngx_string("sentinel_scanner"), NULL,
       ngx_sentinel_var_scanner, 0, NGX_HTTP_VAR_NOCACHEABLE, 0 },
@@ -879,6 +916,34 @@ ngx_sentinel_var_throttled(ngx_http_request_t *r, ngx_http_variable_value_t *v,
 }
 
 static ngx_int_t
+ngx_sentinel_var_pow(ngx_http_request_t *r, ngx_http_variable_value_t *v,
+    uintptr_t data)
+{
+    ngx_sentinel_ctx_t  *ctx;
+    ngx_str_t            s;
+
+    ctx = ngx_sentinel_get_ctx(r);
+    if (ctx == NULL) {
+        v->not_found = 1;
+        return NGX_OK;
+    }
+
+    switch (ctx->pow_state) {
+    case NGX_SENTINEL_POW_VERIFIED:  ngx_str_set(&s, "verified");  break;
+    case NGX_SENTINEL_POW_CHALLENGE: ngx_str_set(&s, "challenge"); break;
+    default:                         ngx_str_set(&s, "off");       break;
+    }
+
+    v->len  = s.len;
+    v->data = s.data;
+    v->valid  = 1;
+    v->not_found   = 0;
+    v->no_cacheable = 1;
+
+    return NGX_OK;
+}
+
+static ngx_int_t
 ngx_sentinel_var_scanner(ngx_http_request_t *r, ngx_http_variable_value_t *v,
     uintptr_t data)
 {
@@ -1017,7 +1082,7 @@ ngx_sentinel_preaccess_handler(ngx_http_request_t *r)
                   "shadow=%i errrate=%ui bot=%i scanner=%i header=%i "
                   "honeypot=%i velocity=%i asn=%i coherence=%i "
                   "fcrdns_verified=%i fcrdns_spoofed=%i "
-                  "allowlist=%i crowdsec=%i cs_action=%ui",
+                  "allowlist=%i crowdsec=%i cs_action=%ui pow=%ui",
                   ctx->score,
                   verdict_strings[ctx->verdict],
                   ctx->inputs.ja4h,
@@ -1034,7 +1099,8 @@ ngx_sentinel_preaccess_handler(ngx_http_request_t *r)
                   (ngx_int_t) ctx->inputs.fcrdns_spoofed,
                   (ngx_int_t) ctx->inputs.allowlisted,
                   (ngx_int_t) ctx->inputs.crowdsec_hit,
-                  (ngx_uint_t) ctx->inputs.crowdsec_action);
+                  (ngx_uint_t) ctx->inputs.crowdsec_action,
+                  (ngx_uint_t) ctx->pow_state);
 
     /* 4. Shadow mode: compute + log, never enforce → always pass. */
     if (lcf->shadow) {
@@ -1052,10 +1118,25 @@ ngx_sentinel_preaccess_handler(ngx_http_request_t *r)
         return NGX_DECLINED;
 
     case NGX_SENTINEL_VERDICT_CHALLENGE:
-        /* TODO Phase 2: redirect to challenge URI / js-challenge handoff */
-        ngx_log_error(NGX_LOG_INFO, r->connection->log, 0,
-                      "sentinel: verdict=challenge (enforce deferred Phase 2)");
-        return NGX_DECLINED;
+        /* PoW challenge: serve a stateless hashcash puzzle gated by a signed
+         * cookie. Fails open (DECLINED) when disabled / no secret / valid
+         * cookie / valid solution; serves the page (NGX_DONE) otherwise. */
+        {
+            /* dispatch may finalize the request (serve the challenge page) and
+             * free the request pool. On NGX_DONE we MUST return immediately
+             * without touching r / ctx again (UAF otherwise). Log only on the
+             * pass-through path, where r is still alive. */
+            ngx_int_t  prc = sentinel_pow_dispatch(r, lcf, ctx);
+
+            if (prc == NGX_DONE) {
+                return NGX_DONE;  /* challenge page served, request owned */
+            }
+
+            ngx_log_error(NGX_LOG_INFO, r->connection->log, 0,
+                          "sentinel: verdict=challenge pow_state=%ui",
+                          (ngx_uint_t) ctx->pow_state);
+            return NGX_DECLINED;  /* pass through (verified / off) */
+        }
 
     case NGX_SENTINEL_VERDICT_TARPIT:
         {
@@ -1382,6 +1463,11 @@ ngx_sentinel_create_loc_conf(ngx_conf_t *cf)
     lcf->block_ttl           = NGX_CONF_UNSET;
     lcf->throttle_rate       = NGX_CONF_UNSET_SIZE;
 
+    lcf->pow_enabled         = NGX_CONF_UNSET;
+    lcf->pow_difficulty      = NGX_CONF_UNSET;
+    lcf->pow_ttl             = NGX_CONF_UNSET;
+    /* pow_secret empty via pcalloc. */
+
     lcf->fcrdns_zone = NGX_CONF_UNSET_PTR;
     lcf->fcrdns_ttl  = NGX_CONF_UNSET;
     /* fcrdns_zone_name empty + fcrdns_suffixes empty via pcalloc. */
@@ -1647,6 +1733,22 @@ ngx_sentinel_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
     }
 
     ngx_conf_merge_size_value(conf->throttle_rate, prev->throttle_rate, 0);
+
+    ngx_conf_merge_value(conf->pow_enabled, prev->pow_enabled, 0);
+    ngx_conf_merge_str_value(conf->pow_secret, prev->pow_secret, "");
+    ngx_conf_merge_value(conf->pow_difficulty, prev->pow_difficulty, 16);
+    ngx_conf_merge_value(conf->pow_ttl, prev->pow_ttl, 3600);
+
+    if (conf->pow_difficulty < 1 || conf->pow_difficulty > 32) {
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                           "sentinel_pow_difficulty must be 1..32");
+        return NGX_CONF_ERROR;
+    }
+    if (conf->pow_ttl < 1) {
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                           "sentinel_pow_ttl must be >= 1");
+        return NGX_CONF_ERROR;
+    }
 
     /* inherit zone pointer from parent if not set locally */
     if (conf->zone == NULL) {
