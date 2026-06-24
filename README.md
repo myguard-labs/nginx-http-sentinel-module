@@ -51,6 +51,7 @@ non-negative integer.
 | `sentinel_weight_header N;` | `25` | Added once when a request-header anomaly is detected (HTTP/1.1 without Host, Content-Length + Transfer-Encoding both present, duplicate Host, or neither Accept nor User-Agent). |
 | `sentinel_weight_honeypot N;` | `90` | Added once when the request URI matches a configured decoy-path prefix (see `sentinel_honeypot`). |
 | `sentinel_weight_velocity N;` | `30` | Added once when the request rate for this identity exceeds the configured threshold in the velocity zone. |
+| `sentinel_weight_asn N;` | `35` | Added once when the client's ASN (read from an operator-supplied geoip2 variable) matches the flagged datacenter/abuse-ASN list (see `sentinel_asn`). |
 
 ### Velocity signal (`sentinel_velocity_zone` + `sentinel_velocity`)
 
@@ -173,6 +174,53 @@ http {
     }
 }
 ```
+
+### Datacenter / abuse ASN (location / server / http context)
+
+Flags requests originating from a configured list of datacenter or abuse
+Autonomous System Numbers (e.g. cloud-provider ranges that no legitimate
+end-user browser should sit behind). A match sets `$sentinel_asn` to `1` and
+adds `sentinel_weight_asn` (default `35`) once.
+
+**The module does NOT link libmaxminddb or own any GeoIP database.** ASN lookup
+is delegated entirely to the separately-packaged
+[ngx_http_geoip2_module](https://github.com/leev/ngx_http_geoip2_module)
+(Debian: `libnginx-mod-http-geoip2`). The operator maps a geoip2 ASN variable
+into sentinel via `sentinel_asn`; sentinel reads that variable per request,
+parses it as an unsigned ASN, and matches it against `sentinel_datacenter_asn`.
+
+| Directive | Default | Meaning |
+|-----------|---------|---------|
+| `sentinel_asn <variable>;` | — | The geoip2 ASN source variable (e.g. `$geoip2_asn`). Empty/unset = signal off. The value is parsed as an unsigned integer; non-numeric or empty values fail open (no flag). |
+| `sentinel_datacenter_asn N [N ...];` | — | One or more flagged ASNs (space-separated; repeatable; child inherits parent if not overridden). |
+
+**Variable:** `$sentinel_asn` — `1` if the client's ASN matched the flagged
+list, `0` otherwise.
+
+**Example:**
+
+```nginx
+http {
+    # geoip2 module owns the MaxMind DB and sets the ASN variable.
+    geoip2 /usr/share/GeoIP/GeoLite2-ASN.mmdb {
+        $geoip2_asn autonomous_system_number;
+    }
+
+    server {
+        sentinel_asn $geoip2_asn;
+        sentinel_datacenter_asn 16509 14618 15169 14061 16276;  # AWS, AWS, GCP, DigitalOcean, OVH
+
+        location / {
+            sentinel on;
+            sentinel_mode enforce;
+        }
+    }
+}
+```
+
+> **Fail-open:** if the geoip2 module is not loaded, the source variable is
+> unset, or the IP is not in the DB (empty value), the signal contributes `0` —
+> it never blocks on a missing lookup.
 
 ### Tarpit (location context)
 
@@ -329,6 +377,7 @@ values computed in the `PREACCESS` phase.
 | `$sentinel_header_anomaly` | `0`/`1` | Suspicious/malformed request headers |
 | `$sentinel_honeypot` | `0`/`1` | URI matched a decoy-path prefix |
 | `$sentinel_velocity` | `0`/`1` | Per-identity request rate exceeded |
+| `$sentinel_asn` | `0`/`1` | Client ASN in the flagged datacenter/abuse list |
 | `$sentinel_allowlist` | `0`/`1` | Client IP in a trusted CIDR |
 | `$sentinel_crowdsec` | `0`/`1` | IP present in the CrowdSec ban table |
 | `$sentinel_crowdsec_action` | token | `none` / `ban` / `captcha` / `throttle` |
@@ -343,7 +392,8 @@ log_format sentinel_decision escape=json
     '"ja4h":"$sentinel_ja4h","errrate":$sentinel_errrate,'
     '"scanner":$sentinel_scanner,"bot":$sentinel_bot,'
     '"header_anomaly":$sentinel_header_anomaly,"honeypot":$sentinel_honeypot,'
-    '"velocity":$sentinel_velocity,"allowlist":$sentinel_allowlist,'
+    '"velocity":$sentinel_velocity,"asn":$sentinel_asn,'
+    '"allowlist":$sentinel_allowlist,'
     '"crowdsec":$sentinel_crowdsec,"crowdsec_action":"$sentinel_crowdsec_action",'
     '"throttled":$sentinel_throttled}';
 
