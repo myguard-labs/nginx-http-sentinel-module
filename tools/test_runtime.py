@@ -226,6 +226,20 @@ http {{
             sentinel_tarpit_max_lifetime 2000;
         }}
 
+        # Maze mode (TEST 14): same forced-tarpit setup, but maze on -> the drip
+        # is HTML decoy crawl-links (text/html, body contains <a href=). Small
+        # byte budget so the drip completes quickly.
+        location = /tarpit-maze {{
+            sentinel on;
+            sentinel_mode enforce;
+            sentinel_threshold challenge=0 tarpit=1 block=999999;
+            sentinel_tarpit_max_conns {tarpit_max_conns};
+            sentinel_tarpit_delay 100;
+            sentinel_tarpit_bytes 256;
+            sentinel_tarpit_max_lifetime 2000;
+            sentinel_tarpit_maze on;
+        }}
+
         # Tarpit shadow: should log "would tarpit" and return normally.
         location = /tarpit-shadow {{
             sentinel on;
@@ -402,7 +416,7 @@ class Nginx:
         html.mkdir(parents=True, exist_ok=True)
         # Static targets for the tarpit/shadow/cs locations (served in the
         # CONTENT phase so PREACCESS — and the sentinel handler — runs).
-        for name in ("tarpit", "tarpit-life", "tarpit-shadow", "cs",
+        for name in ("tarpit", "tarpit-life", "tarpit-maze", "tarpit-shadow", "cs",
                      "block", "block-close", "block-shadow", "block-ttl",
                      "route-strict", "route-lax"):
             (html / name).write_text("ok\n", encoding="ascii")
@@ -992,6 +1006,35 @@ def test_per_route_policy(port: int) -> None:
     print("  TEST 13 per-route-policy: PASS (strict=403, lax=200, same bot UA)")
 
 
+def test_tarpit_maze(port: int) -> None:
+    """TEST 14 - maze mode: a forced-tarpit location with sentinel_tarpit_maze on
+    drips HTML decoy crawl-links instead of blank padding. Assert the response is
+    text/html and the body contains at least one '<a href="/' decoy link."""
+    s = open_slow_connection(port, "/tarpit-maze")
+    s.settimeout(4.0)
+    buf = b""
+    try:
+        while True:
+            chunk = s.recv(4096)
+            if not chunk:
+                break
+            buf += chunk
+    except socket.timeout:
+        pass
+    s.close()
+
+    lower = buf.lower()
+    if b"content-type: text/html" not in lower:
+        raise AssertionError(
+            "TEST 14 maze: expected Content-Type text/html; "
+            f"header block was {buf[:200]!r}")
+    if b'<a href="/' not in buf:
+        raise AssertionError(
+            "TEST 14 maze: body has no decoy '<a href=\"/' link; "
+            f"got {len(buf)} bytes")
+    print(f"  TEST 14 maze: PASS (text/html, decoy links present, body={len(buf)}B)")
+
+
 def test_tarpit_no_malloc_grep(src_dir: pathlib.Path) -> None:
     """T2.4 - structural check: drip tick function contains no palloc/malloc."""
     tarpit_c = src_dir / "sentinel_tarpit.c"
@@ -1320,6 +1363,9 @@ def main() -> int:
 
             # TEST 12 - throttle action (tarpit band -> limit_rate, not drip).
             test_throttle(args.port + 1)
+
+            # TEST 14 - maze mode (tarpit drips HTML decoy links, not padding).
+            test_tarpit_maze(args.port + 1)
 
             nginx2.stop()
             nginx2.assert_clean_logs()

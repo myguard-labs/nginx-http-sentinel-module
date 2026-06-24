@@ -38,7 +38,10 @@ typedef struct {
     ngx_atomic_t       *slot;         /* pointer to this worker's sub-counter   */
     ngx_buf_t           buf;          /* reused every tick, no alloc            */
     ngx_chain_t         chain;        /* ditto                                  */
+    uint32_t            rng;          /* per-ctx LCG state for maze hrefs        */
+    u_char              maze_frag[NGX_SENTINEL_TARPIT_MAZE_FRAG]; /* per-tick scratch */
     unsigned            counted:1;    /* 1 = slot has been incremented          */
+    unsigned            maze:1;       /* 1 = drip HTML link-soup                 */
 } ngx_sentinel_tarpit_ctx_t;
 
 /* -------------------------------------------------------------------------
@@ -171,6 +174,41 @@ sentinel_tarpit_finish(ngx_http_request_t *r)
     ngx_http_finalize_request(r, NGX_HTTP_CLOSE);
 }
 
+/* -------------------------------------------------------------------------
+ * Maze mode: synthesize one decoy crawl-link line into the per-ctx scratch
+ * buffer, e.g.  <a href="/1a2b3c4d5e6f7a8b/">x</a>\n
+ *
+ * The href path is a 16-hex-digit token from a per-ctx LCG (deterministic per
+ * connection, varied per tick) — every link is unique and points back into the
+ * same handler, so a link-following crawler keeps requesting fresh tarpit URLs.
+ * No malloc, no global state mutation; returns the fragment length.
+ * ---------------------------------------------------------------------- */
+
+static ngx_uint_t
+sentinel_tarpit_maze_fragment(ngx_sentinel_tarpit_ctx_t *tctx)
+{
+    static const u_char  hex[] = "0123456789abcdef";
+    u_char              *p;
+    ngx_uint_t           i;
+    uint32_t             rng;
+
+    rng = tctx->rng;
+    p   = tctx->maze_frag;
+
+    p = ngx_cpymem(p, "<a href=\"/", sizeof("<a href=\"/") - 1);
+
+    for (i = 0; i < 16; i++) {
+        /* Numerical Recipes LCG; deterministic, cheap, no global RNG. */
+        rng = rng * 1664525u + 1013904223u;
+        *p++ = hex[(rng >> 24) & 0x0f];
+    }
+    tctx->rng = rng;
+
+    p = ngx_cpymem(p, "/\">x</a>\n", sizeof("/\">x</a>\n") - 1);
+
+    return (ngx_uint_t) (p - tctx->maze_frag);
+}
+
 static void
 sentinel_tarpit_write_handler(ngx_http_request_t *r)
 {
@@ -209,16 +247,30 @@ sentinel_tarpit_write_handler(ngx_http_request_t *r)
         return;
     }
 
-    /* 3. Build buf pointing at global static drip buffer. */
+    /* 3. Build buf. Maze mode drips a fresh decoy-link line from the per-ctx
+     *    scratch buffer; plain mode points at the global static space buffer. */
     tick_bytes = tctx->bytes_total - tctx->bytes_sent;
-    if (tick_bytes > NGX_SENTINEL_TARPIT_TICK_BYTES) {
-        tick_bytes = NGX_SENTINEL_TARPIT_TICK_BYTES;
-    }
 
     /* Reuse the buf/chain fields in ctx — no per-tick alloc. */
     ngx_memzero(&tctx->buf, sizeof(ngx_buf_t));
-    tctx->buf.pos    = ngx_sentinel_drip_buf;
-    tctx->buf.last   = ngx_sentinel_drip_buf + tick_bytes;
+
+    if (tctx->maze) {
+        ngx_uint_t  frag_len = sentinel_tarpit_maze_fragment(tctx);
+
+        if (tick_bytes > frag_len) {
+            tick_bytes = frag_len;
+        }
+        tctx->buf.pos  = tctx->maze_frag;
+        tctx->buf.last = tctx->maze_frag + tick_bytes;
+
+    } else {
+        if (tick_bytes > NGX_SENTINEL_TARPIT_TICK_BYTES) {
+            tick_bytes = NGX_SENTINEL_TARPIT_TICK_BYTES;
+        }
+        tctx->buf.pos  = ngx_sentinel_drip_buf;
+        tctx->buf.last = ngx_sentinel_drip_buf + tick_bytes;
+    }
+
     tctx->buf.memory = 1;
     tctx->buf.flush  = 1;
 
@@ -398,6 +450,12 @@ sentinel_tarpit_start(ngx_http_request_t *r, ngx_sentinel_loc_conf_t *lcf)
     tctx->delay_ms    = (ngx_msec_t) lcf->tarpit_delay;
     tctx->deadline    = ngx_current_msec + (ngx_msec_t) lcf->tarpit_max_lifetime;
     tctx->bytes_sent  = 0;
+    tctx->maze        = lcf->tarpit_maze ? 1 : 0;
+    /* Seed the maze LCG from cheap per-connection entropy (no global RNG):
+     * current ms + the connection fd + ctx address low bits. */
+    tctx->rng = (uint32_t) ngx_current_msec
+              ^ (uint32_t) (uintptr_t) c->fd
+              ^ (uint32_t) (uintptr_t) tctx;
     /* tctx->counted set AFTER cleanup registration. */
 
     /* 3. Register pool cleanup — the ONE AND ONLY decrement site.
@@ -422,8 +480,14 @@ sentinel_tarpit_start(ngx_http_request_t *r, ngx_sentinel_loc_conf_t *lcf)
 
     r->headers_out.status           = NGX_HTTP_OK;
     r->headers_out.content_length_n = -1;
-    r->headers_out.content_type.len  = sizeof("text/plain") - 1;
-    r->headers_out.content_type.data = (u_char *) "text/plain";
+
+    if (tctx->maze) {
+        r->headers_out.content_type.len  = sizeof("text/html") - 1;
+        r->headers_out.content_type.data = (u_char *) "text/html";
+    } else {
+        r->headers_out.content_type.len  = sizeof("text/plain") - 1;
+        r->headers_out.content_type.data = (u_char *) "text/plain";
+    }
     r->headers_out.content_type_len  = r->headers_out.content_type.len;
 
     rc = ngx_http_send_header(r);
@@ -454,9 +518,10 @@ sentinel_tarpit_start(ngx_http_request_t *r, ngx_sentinel_loc_conf_t *lcf)
     ngx_add_timer(c->write, tctx->delay_ms);
 
     ngx_log_error(NGX_LOG_INFO, c->log, 0,
-                  "sentinel: tarpitting (delay=%Mms bytes=%ui lifetime=%Mms)",
+                  "sentinel: tarpitting (delay=%Mms bytes=%ui lifetime=%Mms maze=%ui)",
                   tctx->delay_ms, tctx->bytes_total,
-                  (ngx_msec_t) lcf->tarpit_max_lifetime);
+                  (ngx_msec_t) lcf->tarpit_max_lifetime,
+                  (ngx_uint_t) tctx->maze);
 
     return NGX_DONE;
 }

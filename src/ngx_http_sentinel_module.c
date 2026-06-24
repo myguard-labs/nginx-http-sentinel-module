@@ -263,6 +263,15 @@ static ngx_command_t ngx_sentinel_commands[] = {
       0,
       NULL },
 
+    /* sentinel_tarpit_maze on|off;  default off. When on, the tarpit drips
+     * HTML decoy crawl-links instead of blank padding (maze mode). */
+    { ngx_string("sentinel_tarpit_maze"),
+      NGX_HTTP_MAIN_CONF | NGX_HTTP_SRV_CONF | NGX_HTTP_LOC_CONF | NGX_CONF_FLAG,
+      ngx_conf_set_flag_slot,
+      NGX_HTTP_LOC_CONF_OFFSET,
+      offsetof(ngx_sentinel_loc_conf_t, tarpit_maze),
+      NULL },
+
     /* sentinel_block_status N;  default 403; 444=drop conn; bounds [400,599] */
     { ngx_string("sentinel_block_status"),
       NGX_HTTP_MAIN_CONF | NGX_HTTP_SRV_CONF | NGX_HTTP_LOC_CONF | NGX_CONF_TAKE1,
@@ -1188,6 +1197,7 @@ ngx_sentinel_create_loc_conf(ngx_conf_t *cf)
     lcf->tarpit_delay        = NGX_CONF_UNSET;
     lcf->tarpit_bytes        = NGX_CONF_UNSET;
     lcf->tarpit_max_lifetime = NGX_CONF_UNSET;
+    lcf->tarpit_maze         = NGX_CONF_UNSET;
     lcf->block_status        = NGX_CONF_UNSET;
     lcf->block_ttl           = NGX_CONF_UNSET;
     lcf->throttle_rate       = NGX_CONF_UNSET_SIZE;
@@ -1352,6 +1362,7 @@ ngx_sentinel_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
                          prev->tarpit_bytes, 1024);
     ngx_conf_merge_value(conf->tarpit_max_lifetime,
                          prev->tarpit_max_lifetime, 30000);
+    ngx_conf_merge_value(conf->tarpit_maze, prev->tarpit_maze, 0);
 
     /* Bounds validation (reject out-of-range values that slipped through). */
     if (conf->tarpit_max_conns < 0 || conf->tarpit_max_conns > 65536) {
