@@ -22,7 +22,6 @@ jobs:
     timeout-minutes: 20
     permissions:
       contents: read
-      security-events: write
 
     steps:
       - name: Checkout
@@ -75,11 +74,8 @@ jobs:
           cd /usr/share/nginx/src
           CC=gcc ./configure --with-compat --add-dynamic-module="$GITHUB_WORKSPACE" > /dev/null 2>&1 || true
 
-      - name: flawfinder (security risk scanner, SARIF)
+      - name: flawfinder (security risk scanner)
         run: |
-          flawfinder --minlevel=1 --sarif \
-            "$GITHUB_WORKSPACE/src/" \
-            > flawfinder.sarif 2>/dev/null || true
           flawfinder --minlevel=1 \
             "$GITHUB_WORKSPACE/src/" \
             2>&1 | tee flawfinder.log
@@ -90,14 +86,6 @@ jobs:
             exit 1
           fi
           echo "flawfinder: Scan complete"
-
-      - name: Upload flawfinder SARIF
-        if: always()
-        uses: github/codeql-action/upload-sarif@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4
-        with:
-          sarif_file: flawfinder.sarif
-          category: flawfinder
-        continue-on-error: true
 
       - name: clang-tidy (cert-*, bugprone-*, clang-analyzer-security.*)
         run: |
@@ -120,17 +108,8 @@ jobs:
           semgrep scan \
             --config "p/c" \
             --config "p/security-audit" \
-            --sarif --output semgrep.sarif \
             "$GITHUB_WORKSPACE/src/" 2>&1 | tee semgrep.log || true
           echo "semgrep: Scan complete"
-
-      - name: Upload semgrep SARIF
-        if: always()
-        uses: github/codeql-action/upload-sarif@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4
-        with:
-          sarif_file: semgrep.sarif
-          category: semgrep
-        continue-on-error: true
 
       - name: Upload security reports
         if: always()
@@ -139,8 +118,6 @@ jobs:
           name: security-reports
           path: |
             ${{ github.workspace }}/flawfinder.log
-            ${{ github.workspace }}/flawfinder.sarif
             ${{ github.workspace }}/clang-tidy.log
             ${{ github.workspace }}/semgrep.log
-            ${{ github.workspace }}/semgrep.sarif
           retention-days: 14
