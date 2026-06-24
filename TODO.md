@@ -71,7 +71,8 @@ Each = own small PR. Full catalog + config examples: the pitch page (DESIGN.md l
 - [x] velocity: edge — child-loc bad zone name silently inherited parent binding. Fixed: clear vel_zone before name resolution → unknown name now rejected. Runtime T8b covers it — PR #6, dev 2026-06-23
 - [ ] test harness: t/basic.t (Test::Nginx) is non-functional — all tests die with "sentinel directive is not allowed here" (module never load_module'd by harness). Either wire %%TEST_NGINX_LOAD_MODULES%% / main_config load, or drop t/*.t and rely on tools/test_runtime.py (current authority). Coverage currently lives in test_runtime.py + t/test_score.c unit
 - [ ] signals: HTTP/2 frame-order fingerprint; UA↔fingerprint coherence; datacenter/ASN (geoip2)
-- [ ] actions: built-in proof-of-work challenge; throttle (bandwidth-cap); cache-only origin-shield; tarpit maze mode; CrowdSec verdict feedback
+- [x] actions: throttle (bandwidth-cap) — `sentinel_throttle_rate size;` forks the TARPIT verdict (enforce) to cap egress via native r->limit_rate instead of dripping; $sentinel_throttled var. Runtime TEST 12. PR #16, master 2026-06-24
+- [ ] actions: built-in proof-of-work challenge; cache-only origin-shield; tarpit maze mode; CrowdSec verdict feedback
 - [x] ops: TTL soft-bans — `sentinel_block_ttl S;` persists a self-ban (now+ttl) in the errrate zone on BLOCK/enforce; reuses errrate blocked_until → w_blocked re-block, no re-eval; fail-open if no zone; shadow never persists. Runtime TEST 11. PR #15, master 2026-06-24
 - [ ] ops: per-route policy; allowlist (verified search engines + monitoring); metrics → VTS/statsd/OTel; structured decision log
 
