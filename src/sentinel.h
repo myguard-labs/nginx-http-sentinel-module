@@ -159,6 +159,13 @@ typedef enum {
     NGX_SENTINEL_VERDICT_BLOCK     = 3
 } ngx_sentinel_verdict_e;
 
+/* $sentinel_pow states (PoW challenge action). */
+typedef enum {
+    NGX_SENTINEL_POW_OFF       = 0,  /* disabled / no secret / fail-open */
+    NGX_SENTINEL_POW_VERIFIED  = 1,  /* valid cookie or solution accepted */
+    NGX_SENTINEL_POW_CHALLENGE = 2   /* challenge page served this request */
+} ngx_sentinel_pow_state_e;
+
 /* -------------------------------------------------------------------------
  * Shared-memory node (rbtree + LRU queue entry per identity)
  * ---------------------------------------------------------------------- */
@@ -272,6 +279,7 @@ typedef struct {
 
     unsigned                computed:1;  /* signals already gathered */
     unsigned                throttled:1; /* throttle action applied this request */
+    unsigned                pow_state:2; /* ngx_sentinel_pow_state_e */
 } ngx_sentinel_ctx_t;
 
 /* -------------------------------------------------------------------------
@@ -375,6 +383,13 @@ typedef struct {
      * dripping a trap, let the request proceed but cap egress at this many
      * bytes/sec via nginx's native r->limit_rate (0 = off, keep tarpit). */
     size_t                   throttle_rate;
+
+    /* PoW challenge: on a CHALLENGE-band verdict in enforce mode, serve a
+     * stateless hashcash puzzle and gate access behind a signed cookie. */
+    ngx_flag_t               pow_enabled;    /* sentinel_pow on|off */
+    ngx_str_t                pow_secret;     /* HMAC key (empty = off) */
+    ngx_int_t                pow_difficulty; /* required leading zero bits */
+    ngx_int_t                pow_ttl;        /* challenge-bucket + cookie TTL (s) */
 } ngx_sentinel_loc_conf_t;
 
 /* -------------------------------------------------------------------------
@@ -555,6 +570,20 @@ void sentinel_fcrdns_signal(ngx_http_request_t *r,
  */
 void sentinel_coherence_signal(ngx_http_request_t *r,
     ngx_sentinel_inputs_t *inputs);
+
+/* -------------------------------------------------------------------------
+ * PoW challenge API (sentinel_pow.c)
+ * ---------------------------------------------------------------------- */
+
+/*
+ * sentinel_pow_dispatch — handle a CHALLENGE-band verdict. Serves a stateless
+ * hashcash puzzle (HMAC challenge keyed on IP+time-bucket) and gates access via
+ * a signed cookie. Returns NGX_DECLINED to pass (off / valid cookie / valid
+ * solution) or NGX_DONE if a challenge page was served. Fails CLOSED on a
+ * present-but-invalid cookie; fails OPEN only when disabled / no secret.
+ */
+ngx_int_t sentinel_pow_dispatch(ngx_http_request_t *r,
+    ngx_sentinel_loc_conf_t *lcf, ngx_sentinel_ctx_t *ctx);
 
 /* -------------------------------------------------------------------------
  * Score API (sentinel_score.c)

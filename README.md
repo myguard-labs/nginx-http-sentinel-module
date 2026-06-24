@@ -387,6 +387,56 @@ Requires a `sentinel_zone` bound to the location (the errrate zone); if none is
 configured the soft-ban is skipped (fail-open) and only the immediate block fires.
 Shadow mode never persists a soft-ban.
 
+### Proof-of-work challenge (location / server / http context)
+
+When the verdict is `challenge` (the band between `tarpit` and `block`),
+`enforce` mode can serve a built-in **proof-of-work** gate instead of letting
+the request through. Sentinel returns a small, self-contained HTML+JS page that
+asks the browser to find a nonce such that
+`SHA256(challenge || nonce)` has at least `difficulty` leading zero **bits**.
+A real browser solves it in well under a second; a headless flood pays CPU per
+request. On success the client receives a signed bypass cookie and is not
+challenged again until it expires.
+
+| Directive | Default | Bounds | Description |
+|---|---|---|---|
+| `sentinel_pow on\|off;` | `off` | — | Enable the PoW challenge for `challenge`-band verdicts. |
+| `sentinel_pow_secret <key>;` | — | required | HMAC signing key for the stateless challenge and the bypass cookie. **Required**; with no secret the challenge is disabled (fail-open). |
+| `sentinel_pow_difficulty N;` | `16` | `1`–`32` | Required leading zero **bits** of the solution hash. Each extra bit doubles the expected work. |
+| `sentinel_pow_ttl S;` | `3600` | `>= 1` | Lifetime (seconds) of both the challenge time-bucket and the bypass cookie. |
+
+The challenge is **stateless** — no shared memory:
+
+```
+challenge = HMAC-SHA256(secret, binary_remote_addr || floor(now / ttl))
+cookie    = <expiry> "." HMAC-SHA256(secret, IP || expiry)
+```
+
+The client re-requests with the nonce in the `X-Sentinel-Pow` header or the
+`?__sentinel_pow=` query argument; the module recomputes the challenge, checks
+the difficulty, and issues the `__sentinel_pow` cookie (`Path=/; HttpOnly`,
+`Max-Age = ttl`). Subsequent requests carrying a valid, unexpired cookie bypass
+the challenge.
+
+Security posture: cookie/solution HMACs are **constant-time** compared; a
+request with a **present but invalid/expired cookie fails closed** (it is
+re-challenged, never allowed through); the module fails **open** only when PoW
+is disabled or no secret is configured. No DNS, no malloc in the verify path
+beyond a couple of small request-pool buffers. Uses OpenSSL (`-lcrypto`, already
+linked) — no external dependency. `$sentinel_pow` reports `off` / `challenge`
+(page served) / `verified` (cookie or solution accepted).
+
+```nginx
+location / {
+    sentinel on;
+    sentinel_mode enforce;
+    sentinel_pow on;
+    sentinel_pow_secret "change-me-to-a-long-random-string";
+    sentinel_pow_difficulty 18;
+    sentinel_pow_ttl 1800;
+}
+```
+
 ### CrowdSec feed (out-of-band)
 
 Sentinel never queries CrowdSec from the request path. An external sidecar (the
@@ -469,6 +519,7 @@ values computed in the `PREACCESS` phase.
 | `$sentinel_crowdsec` | `0`/`1` | IP present in the CrowdSec ban table |
 | `$sentinel_crowdsec_action` | token | `none` / `ban` / `captcha` / `throttle` |
 | `$sentinel_throttled` | `0`/`1` | Throttle action applied (tarpit verdict served with capped egress) |
+| `$sentinel_pow` | token | `off` / `challenge` (PoW page served) / `verified` (cookie or solution accepted) |
 
 **Example — JSON decision log:**
 

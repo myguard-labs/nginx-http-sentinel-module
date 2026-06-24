@@ -121,7 +121,8 @@ jobs:
               "$GITHUB_WORKSPACE/src/sentinel_velocity.c" \
               "$GITHUB_WORKSPACE/src/sentinel_asn.c" \
               "$GITHUB_WORKSPACE/src/sentinel_coherence.c" \
-              "$GITHUB_WORKSPACE/src/sentinel_fcrdns.c"; do
+              "$GITHUB_WORKSPACE/src/sentinel_fcrdns.c" \
+              "$GITHUB_WORKSPACE/src/sentinel_pow.c"; do
               "${{ matrix.cc }}" -c -fPIC $cflags \
                 -Wall -Wextra -Wshadow -Wstrict-prototypes \
                 -Wstrict-aliasing -Wunreachable-code -Werror \

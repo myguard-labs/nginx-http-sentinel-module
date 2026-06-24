@@ -430,6 +430,27 @@ http {{
             return 200 "fcrdns";
         }}
 
+        # TEST 18 (PoW challenge): enforce mode, bands tuned so a bot UA lands
+        # in the CHALLENGE band only (score 50: >= challenge 10, < tarpit 95).
+        # No cookie -> challenge page (text/html + PoW JS); a valid signed
+        # cookie -> bypass (the upstream "pow-ok" body); a forged cookie ->
+        # fail closed (re-challenge). Difficulty 1 so the test can solve it.
+        location = /pow {{
+            sentinel on;
+            sentinel_mode enforce;
+            sentinel_threshold challenge=10 tarpit=95 block=99;
+            sentinel_weight_bot 50;
+            sentinel_pow on;
+            sentinel_pow_secret "test-pow-secret-key";
+            sentinel_pow_difficulty 1;
+            sentinel_pow_ttl 300;
+            add_header X-Pow $sentinel_pow always;
+            # No `return`: serve the static html/pow file in the CONTENT phase so
+            # the PREACCESS sentinel handler runs (a return finalizes in REWRITE
+            # first). On bypass the body is "pow-ok"; on challenge the module
+            # replaces it with the PoW page.
+        }}
+
 {cs_block}    }}
 }}
 """
@@ -472,8 +493,10 @@ class Nginx:
         # CONTENT phase so PREACCESS — and the sentinel handler — runs).
         for name in ("tarpit", "tarpit-life", "tarpit-maze", "tarpit-shadow", "cs",
                      "block", "block-close", "block-shadow", "block-ttl",
-                     "route-strict", "route-lax"):
+                     "route-strict", "route-lax", "pow"):
             (html / name).write_text("ok\n", encoding="ascii")
+        # PoW bypass target (served in CONTENT phase once challenge passes).
+        (html / "pow").write_text("pow-ok", encoding="ascii")
         # Throttle target: at 4k/s a 16k body takes ~4s (measurably throttled).
         (html / "throttle").write_text("x" * 16384, encoding="ascii")
         (self.root / "conf" / "nginx.conf").write_text(
@@ -1041,6 +1064,100 @@ def test_throttle(port: int) -> None:
     print(f"  TEST 12 throttle: PASS (200, throttled=1, body={len(body)}B)")
 
 
+def test_pow_challenge(port: int) -> None:
+    """TEST 18 - PoW challenge.
+
+    A bot-UA (curl) lands in the CHALLENGE band on /pow (enforce). With no
+    cookie, sentinel must serve a self-contained HTML+JS PoW page (not the
+    upstream "pow-ok"). Solving the puzzle and re-requesting with the nonce
+    must yield 200 "pow-ok" + a Set-Cookie + X-Pow: verified. A forged cookie
+    must FAIL CLOSED (re-challenge), never bypass.
+    """
+    import hashlib
+    import hmac as _hmac
+
+    SECRET = b"test-pow-secret-key"
+    TTL = 300
+    BOT = {"User-Agent": "python-requests/2.31.0"}
+
+    # 1. No cookie -> challenge page.
+    st, hdr, body = fetch(port, "/pow", extra_headers=BOT)
+    if st != 200:
+        raise AssertionError(f"TEST 18 pow: challenge expected 200, got {st}")
+    if hdr.get("x-pow") != "challenge":
+        raise AssertionError(
+            f"TEST 18 pow: expected X-Pow=challenge, got {hdr.get('x-pow')!r}")
+    if "crypto.subtle" not in body or "<!doctype html>" not in body.lower():
+        raise AssertionError(
+            "TEST 18 pow: challenge body missing PoW JS / HTML")
+    if body == "pow-ok":
+        raise AssertionError("TEST 18 pow: upstream leaked through challenge")
+
+    # 2. Replicate the stateless challenge = HMAC(secret, ip4 || bucket).
+    bucket = int(time.time()) // TTL
+    ip = bytes((127, 0, 0, 1))            # loopback binary_remote_addr
+    challenge = _hmac.new(SECRET, ip + str(bucket).encode(),
+                          hashlib.sha256).hexdigest().encode()
+
+    def leading_zero_bits(d: bytes) -> int:
+        n = 0
+        for b in d:
+            if b == 0:
+                n += 8
+                continue
+            while (b & 0x80) == 0:
+                n += 1
+                b = (b << 1) & 0xFF
+            break
+        return n
+
+    nonce = 0
+    while leading_zero_bits(
+            hashlib.sha256(challenge + str(nonce).encode()).digest()) < 1:
+        nonce += 1
+        if nonce > 100000:
+            raise AssertionError("TEST 18 pow: could not solve difficulty 1")
+
+    # 3. Submit the solution -> bypass + signed cookie.
+    sh = dict(BOT)
+    sh["X-Sentinel-Pow"] = str(nonce)
+    st, hdr, body = fetch(port, "/pow", extra_headers=sh)
+    if st != 200 or body != "pow-ok":
+        raise AssertionError(
+            f"TEST 18 pow: solved request expected 200/pow-ok, got {st}/{body!r}")
+    if hdr.get("x-pow") != "verified":
+        raise AssertionError(
+            f"TEST 18 pow: expected X-Pow=verified, got {hdr.get('x-pow')!r}")
+    setck = hdr.get("set-cookie", "")
+    if "__sentinel_pow=" not in setck:
+        raise AssertionError("TEST 18 pow: no bypass Set-Cookie issued")
+
+    # 4. Re-use the issued cookie -> bypass directly.
+    cookie_val = setck.split(";", 1)[0]
+    ch = dict(BOT)
+    ch["Cookie"] = cookie_val
+    st, hdr, body = fetch(port, "/pow", extra_headers=ch)
+    if st != 200 or body != "pow-ok" or hdr.get("x-pow") != "verified":
+        raise AssertionError(
+            f"TEST 18 pow: valid cookie must bypass, got {st}/{body!r}/"
+            f"{hdr.get('x-pow')!r}")
+
+    # 5. Forged cookie (good shape, bad MAC) must FAIL CLOSED (re-challenge).
+    expiry = int(time.time()) + TTL
+    forged = f"__sentinel_pow={expiry}." + ("0" * 64)
+    fh = dict(BOT)
+    fh["Cookie"] = forged
+    st, hdr, body = fetch(port, "/pow", extra_headers=fh)
+    if hdr.get("x-pow") != "challenge" or body == "pow-ok":
+        raise AssertionError(
+            "TEST 18 pow: forged cookie must re-challenge (fail closed), "
+            f"got X-Pow={hdr.get('x-pow')!r} body={body!r}")
+
+    print("  TEST 18 pow: PASS "
+          f"(challenge->solve->cookie-bypass; forged cookie fails closed, "
+          f"nonce={nonce})")
+
+
 def test_per_route_policy(port: int) -> None:
     """TEST 13 - per-route policy: the SAME bot-UA identity gets opposite
     verdicts in two sibling locations, proving sentinel directives merge and
@@ -1498,6 +1615,8 @@ def main() -> int:
 
             # TEST 13: per-route policy — same bot UA, opposite verdicts in two
             # sibling locations (strict blocks, lax allows).
+            test_pow_challenge(args.port)
+
             test_per_route_policy(args.port)
 
             nginx.stop()

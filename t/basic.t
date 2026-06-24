@@ -176,6 +176,7 @@ sentinel_velocity: unknown velocity zone "nosuchzone"
     add_header X-Asn       $sentinel_asn;
     add_header X-Coherence $sentinel_coherence;
     add_header X-Fcrdns    $sentinel_fcrdns;
+    add_header X-Pow       $sentinel_pow;
     location = /.git/config {
         return 200 "decision";
     }
@@ -193,4 +194,5 @@ X-Throttled: 0
 X-Asn: 0
 X-Coherence: 0
 X-Fcrdns: pending
+X-Pow: off
 --- error_code: 200
