@@ -334,6 +334,7 @@ sentinel_shm_crowdsec_create(ngx_sentinel_zone_t *zone, uint32_t hash,
     n->blocked_until = 0;
     n->cs_action     = NGX_SENTINEL_CS_NONE;
     n->cs_generation = 0;
+    n->redis_pulled  = 0;
     ngx_memcpy(n->data, key->data, key->len);
 
     ngx_rbtree_insert(&zone->sh->rbtree, &n->node);
@@ -344,7 +345,8 @@ sentinel_shm_crowdsec_create(ngx_sentinel_zone_t *zone, uint32_t hash,
 
 ngx_int_t
 sentinel_shm_crowdsec_upsert(ngx_sentinel_zone_t *zone, ngx_str_t *key,
-    time_t expiry, u_char action, ngx_uint_t generation, time_t now)
+    time_t expiry, u_char action, ngx_uint_t generation, time_t now,
+    u_char redis_pulled)
 {
     uint32_t              hash;
     ngx_sentinel_node_t  *n;
@@ -368,6 +370,7 @@ sentinel_shm_crowdsec_upsert(ngx_sentinel_zone_t *zone, ngx_str_t *key,
     n->blocked_until = expiry;
     n->cs_action     = action;
     n->cs_generation = generation;
+    n->redis_pulled  = redis_pulled;
     n->last_seen     = now;
 
     return NGX_OK;

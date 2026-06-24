@@ -50,6 +50,8 @@ static char *ngx_sentinel_set_crowdsec_zone(ngx_conf_t *cf,
     ngx_command_t *cmd, void *conf);
 static char *ngx_sentinel_set_crowdsec_feed(ngx_conf_t *cf,
     ngx_command_t *cmd, void *conf);
+static char *ngx_sentinel_set_redis(ngx_conf_t *cf,
+    ngx_command_t *cmd, void *conf);
 static char *ngx_sentinel_set_fcrdns_zone(ngx_conf_t *cf,
     ngx_command_t *cmd, void *conf);
 static char *ngx_sentinel_set_fcrdns(ngx_conf_t *cf,
@@ -471,6 +473,46 @@ static ngx_command_t ngx_sentinel_commands[] = {
       ngx_conf_set_size_slot,
       NGX_HTTP_LOC_CONF_OFFSET,
       offsetof(ngx_sentinel_loc_conf_t, cs_max_bytes),
+      NULL },
+
+    /* sentinel_redis host[:port]; — enable Redis multi-box shared ban state */
+    { ngx_string("sentinel_redis"),
+      NGX_HTTP_MAIN_CONF | NGX_HTTP_SRV_CONF | NGX_HTTP_LOC_CONF | NGX_CONF_TAKE1,
+      ngx_sentinel_set_redis,
+      NGX_HTTP_LOC_CONF_OFFSET,
+      0,
+      NULL },
+
+    /* sentinel_redis_password <pw>; — optional AUTH password */
+    { ngx_string("sentinel_redis_password"),
+      NGX_HTTP_MAIN_CONF | NGX_HTTP_SRV_CONF | NGX_HTTP_LOC_CONF | NGX_CONF_TAKE1,
+      ngx_conf_set_str_slot,
+      NGX_HTTP_LOC_CONF_OFFSET,
+      offsetof(ngx_sentinel_loc_conf_t, redis_password),
+      NULL },
+
+    /* sentinel_redis_prefix <ns>; — key namespace (default "sentinel") */
+    { ngx_string("sentinel_redis_prefix"),
+      NGX_HTTP_MAIN_CONF | NGX_HTTP_SRV_CONF | NGX_HTTP_LOC_CONF | NGX_CONF_TAKE1,
+      ngx_conf_set_str_slot,
+      NGX_HTTP_LOC_CONF_OFFSET,
+      offsetof(ngx_sentinel_loc_conf_t, redis_prefix),
+      NULL },
+
+    /* sentinel_redis_interval time; — pull/flush tick (default 10s) */
+    { ngx_string("sentinel_redis_interval"),
+      NGX_HTTP_MAIN_CONF | NGX_HTTP_SRV_CONF | NGX_HTTP_LOC_CONF | NGX_CONF_TAKE1,
+      ngx_conf_set_sec_slot,
+      NGX_HTTP_LOC_CONF_OFFSET,
+      offsetof(ngx_sentinel_loc_conf_t, redis_interval),
+      NULL },
+
+    /* sentinel_redis_ttl time; — TTL for pushed ban keys (default 3600s) */
+    { ngx_string("sentinel_redis_ttl"),
+      NGX_HTTP_MAIN_CONF | NGX_HTTP_SRV_CONF | NGX_HTTP_LOC_CONF | NGX_CONF_TAKE1,
+      ngx_conf_set_sec_slot,
+      NGX_HTTP_LOC_CONF_OFFSET,
+      offsetof(ngx_sentinel_loc_conf_t, redis_ttl),
       NULL },
 
     /* sentinel_weight_crowdsec N; — base score weight for a crowdsec ban */
@@ -1259,6 +1301,22 @@ ngx_sentinel_preaccess_handler(ngx_http_request_t *r)
             }
         }
 
+        /*
+         * Redis multi-box PUSH: publish this LOCALLY-ORIGINATED ban so peer
+         * nodes pick it up on their next pull tick. Ban-loop guard: skip when
+         * the block was driven by a CrowdSec hit — those bans are externally
+         * sourced (feed or a Redis pull), so re-publishing them would loop.
+         * Non-blocking: enqueues into a shm ring drained by the worker timer;
+         * NO network I/O here. Fail-open (no-op if Redis is off).
+         */
+        if (lcf->redis_host.len > 0 && !ctx->inputs.crowdsec_hit
+            && r->connection->addr_text.len != 0)
+        {
+            sentinel_redis_enqueue_ban(lcf, &r->connection->addr_text,
+                                       NGX_SENTINEL_CS_BAN,
+                                       ngx_time() + (time_t) lcf->redis_ttl);
+        }
+
         /* 444 -> drop the connection without a response; else finalize with
          * the configured HTTP status (default 403). */
         return lcf->block_status;
@@ -1503,6 +1561,12 @@ ngx_sentinel_create_loc_conf(ngx_conf_t *cf)
     lcf->cs_stale_after  = NGX_CONF_UNSET;
     lcf->cs_max_bytes    = NGX_CONF_UNSET_SIZE;
 
+    /* redis_host/password/prefix empty via pcalloc; redis_push_zone NULL.
+     * redis enabled iff sentinel_redis sets redis_host. */
+    lcf->redis_port      = NGX_CONF_UNSET;
+    lcf->redis_interval  = NGX_CONF_UNSET;
+    lcf->redis_ttl       = NGX_CONF_UNSET;
+
     lcf->tarpit_max_conns    = NGX_CONF_UNSET;
     lcf->tarpit_delay        = NGX_CONF_UNSET;
     lcf->tarpit_bytes        = NGX_CONF_UNSET;
@@ -1727,6 +1791,44 @@ ngx_sentinel_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
         return NGX_CONF_ERROR;
     }
 
+    /* Redis multi-box shared state. */
+    if (conf->redis_host.len == 0) {
+        conf->redis_host = prev->redis_host;
+        if (conf->redis_push_zone == NULL) {
+            conf->redis_push_zone = prev->redis_push_zone;
+        }
+    }
+    ngx_conf_merge_value(conf->redis_port, prev->redis_port,
+                         NGX_SENTINEL_REDIS_DEFAULT_PORT);
+    ngx_conf_merge_str_value(conf->redis_password, prev->redis_password, "");
+    ngx_conf_merge_str_value(conf->redis_prefix, prev->redis_prefix,
+                             NGX_SENTINEL_REDIS_DEFAULT_PREFIX);
+    ngx_conf_merge_value(conf->redis_interval, prev->redis_interval,
+                         NGX_SENTINEL_REDIS_DEFAULT_INTERVAL);
+    ngx_conf_merge_value(conf->redis_ttl, prev->redis_ttl,
+                         NGX_SENTINEL_REDIS_DEFAULT_TTL);
+
+    if (conf->redis_host.len > 0) {
+        if (conf->redis_interval < NGX_SENTINEL_REDIS_MIN_INTERVAL
+            || conf->redis_interval > NGX_SENTINEL_REDIS_MAX_INTERVAL)
+        {
+            ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                               "sentinel_redis_interval must be %d..%d s",
+                               NGX_SENTINEL_REDIS_MIN_INTERVAL,
+                               NGX_SENTINEL_REDIS_MAX_INTERVAL);
+            return NGX_CONF_ERROR;
+        }
+        if (conf->redis_ttl < NGX_SENTINEL_REDIS_MIN_TTL
+            || conf->redis_ttl > NGX_SENTINEL_REDIS_MAX_TTL)
+        {
+            ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                               "sentinel_redis_ttl must be %d..%d s",
+                               NGX_SENTINEL_REDIS_MIN_TTL,
+                               NGX_SENTINEL_REDIS_MAX_TTL);
+            return NGX_CONF_ERROR;
+        }
+    }
+
     ngx_conf_merge_value(conf->tarpit_max_conns,
                          prev->tarpit_max_conns, 256);
     ngx_conf_merge_value(conf->tarpit_delay,
@@ -1826,8 +1928,12 @@ ngx_sentinel_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
     /*
      * Phase 3: bind to the single declared crowdsec zone if a feed is set but
      * no explicit cs_zone was assigned. Mirrors the errrate single-zone logic.
+     * Redis multi-box also lands its pulled bans in the crowdsec zone, so the
+     * same auto-bind applies when sentinel_redis is configured.
      */
-    if (conf->cs_zone == NULL && conf->cs_feed.len > 0) {
+    if (conf->cs_zone == NULL
+        && (conf->cs_feed.len > 0 || conf->redis_host.len > 0))
+    {
         ngx_sentinel_main_conf_t  *mcf;
 
         mcf = ngx_http_conf_get_module_main_conf(cf, ngx_http_sentinel_module);
@@ -1836,8 +1942,8 @@ ngx_sentinel_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
             conf->cs_zone = &zones[0];
         } else {
             ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
-                               "sentinel_crowdsec_feed set but no "
-                               "sentinel_crowdsec_zone declared");
+                               "sentinel_crowdsec_feed/sentinel_redis set but "
+                               "no sentinel_crowdsec_zone declared");
             return NGX_CONF_ERROR;
         }
     }
@@ -2255,6 +2361,98 @@ ngx_sentinel_set_crowdsec_feed(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
     return NGX_CONF_OK;
 }
 
+/*
+ * sentinel_redis host[:port];
+ * Enables Redis multi-box shared state. Parses host (NUL-terminated for hiredis)
+ * + optional :port, and declares a dedicated fixed-size push-ring shm zone.
+ */
+static char *
+ngx_sentinel_set_redis(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
+{
+    ngx_sentinel_loc_conf_t  *lcf = conf;
+    ngx_str_t                *value;
+    ngx_str_t                 host, zname;
+    u_char                   *colon;
+    ngx_int_t                 port;
+    ngx_shm_zone_t           *shm;
+    size_t                    zsize;
+
+    value = cf->args->elts;
+
+    if (lcf->redis_host.len > 0) {
+        return "is duplicate";
+    }
+    if (value[1].len == 0) {
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                           "sentinel_redis host must be non-empty");
+        return NGX_CONF_ERROR;
+    }
+
+    host = value[1];
+    port = NGX_SENTINEL_REDIS_DEFAULT_PORT;
+
+    /* Split off :port (last colon; bracketless — IPv6 literals use a hostname
+     * or DNS name in practice for this directive). */
+    colon = ngx_strlchr(value[1].data, value[1].data + value[1].len, ':');
+    if (colon != NULL) {
+        ngx_str_t  pstr;
+        host.len = (size_t) (colon - value[1].data);
+        pstr.data = colon + 1;
+        pstr.len  = value[1].len - host.len - 1;
+        if (pstr.len == 0) {
+            ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                               "sentinel_redis: empty port in \"%V\"", &value[1]);
+            return NGX_CONF_ERROR;
+        }
+        port = ngx_atoi(pstr.data, pstr.len);
+        if (port == NGX_ERROR || port < 1 || port > 65535) {
+            ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                               "sentinel_redis: bad port in \"%V\"", &value[1]);
+            return NGX_CONF_ERROR;
+        }
+    }
+    if (host.len == 0) {
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                           "sentinel_redis host must be non-empty");
+        return NGX_CONF_ERROR;
+    }
+
+    /* NUL-terminate host for hiredis. */
+    lcf->redis_host.data = ngx_pnalloc(cf->pool, host.len + 1);
+    if (lcf->redis_host.data == NULL) {
+        return NGX_CONF_ERROR;
+    }
+    ngx_memcpy(lcf->redis_host.data, host.data, host.len);
+    lcf->redis_host.data[host.len] = '\0';
+    lcf->redis_host.len  = host.len;
+    lcf->redis_port      = port;
+
+    /* Declare a dedicated push-ring shm zone. One ring per host[:port] endpoint
+     * (name derived from host:port so two distinct endpoints get distinct
+     * zones; identical endpoints across locations share one ring). Size = the
+     * fixed ring struct + slab overhead, rounded up to whole pages. */
+    zname.len  = sizeof("sentinel_redis_push_") - 1 + value[1].len;
+    zname.data = ngx_pnalloc(cf->pool, zname.len);
+    if (zname.data == NULL) {
+        return NGX_CONF_ERROR;
+    }
+    ngx_sprintf(zname.data, "sentinel_redis_push_%V", &value[1]);
+
+    zsize = sizeof(ngx_sentinel_redis_shctx_t) + 4 * ngx_pagesize;
+    zsize = ngx_align(zsize, ngx_pagesize);
+
+    shm = ngx_shared_memory_add(cf, &zname, zsize, &ngx_http_sentinel_module);
+    if (shm == NULL) {
+        return NGX_CONF_ERROR;
+    }
+    shm->init = sentinel_redis_init_zone;
+    shm->data = NULL;
+
+    lcf->redis_push_zone = shm;
+
+    return NGX_CONF_OK;
+}
+
 static char *
 ngx_sentinel_set_mode(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 {
@@ -2657,5 +2855,11 @@ ngx_sentinel_init_process(ngx_cycle_t *cycle)
 
     /* Phase 3: arm per-worker crowdsec feed-refresh timers (compose, don't
      * clobber, the tarpit init). Fail-open: returns NGX_OK on any error. */
-    return sentinel_crowdsec_init_process(cycle);
+    rc = sentinel_crowdsec_init_process(cycle);
+    if (rc != NGX_OK) {
+        return rc;
+    }
+
+    /* Redis multi-box: arm the per-worker async sync timer. Fail-open. */
+    return sentinel_redis_init_process(cycle);
 }

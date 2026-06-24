@@ -9,6 +9,7 @@ import os
 import pathlib
 import re
 import shlex
+import shutil
 import signal
 import socket
 import subprocess
@@ -74,8 +75,44 @@ def expect_status(port: int, path: str, expected: int,
 def nginx_config(root: pathlib.Path, port: int,
                  module: pathlib.Path | None, workers: int,
                  tarpit_max_conns: int = 256,
-                 cs_feed: str = "", cs_max_bytes: str = "16m") -> str:
+                 cs_feed: str = "", cs_max_bytes: str = "16m",
+                 redis_host: str = "", redis_port: int = 0) -> str:
     load = f"load_module {module};\n" if module else ""
+    # TEST 20 (Redis multi-box): a crowdsec zone is required so pulled bans have
+    # somewhere to land. /redis-block enforces; a bot UA scores into the block
+    # band, fires a 403, and pushes the ban to Redis. /redis-pull is clean —
+    # after a peer (here: redis-cli) seeds a ban for 127.0.0.1 it blocks too.
+    redis_zone = ""
+    redis_block = ""
+    if redis_host:
+        redis_zone = "    sentinel_crowdsec_zone rcs:2m;\n"
+        redis_block = f"""
+        location = /redis-block {{
+            sentinel on;
+            sentinel_mode enforce;
+            sentinel_redis {redis_host}:{redis_port};
+            sentinel_redis_interval 1;
+            sentinel_redis_ttl 60;
+            sentinel_redis_prefix sentinel;
+            sentinel_weight_bot 100;
+            sentinel_weight_velocity 0;
+            sentinel_threshold challenge=30 tarpit=60 block=80;
+            access_log {root}/logs/redis.log sentinelvars;
+        }}
+
+        location = /redis-pull {{
+            sentinel on;
+            sentinel_mode enforce;
+            sentinel_redis {redis_host}:{redis_port};
+            sentinel_redis_interval 1;
+            sentinel_redis_ttl 60;
+            sentinel_redis_prefix sentinel;
+            sentinel_weight_bot 0;
+            sentinel_weight_velocity 0;
+            sentinel_threshold challenge=30 tarpit=60 block=80;
+            access_log {root}/logs/redis-pull.log sentinelvars;
+        }}
+"""
     # Phase 3: crowdsec feed location. ASCII only (the harness writes config as
     # ASCII). Short interval so a feed change is reflected quickly in tests.
     cs_block = ""
@@ -122,7 +159,7 @@ http {{
         default "";
         "~^[0-9]+$" $http_x_test_asn;
     }}
-{cs_zone}
+{cs_zone}{redis_zone}
 
     server {{
         listen 127.0.0.1:{port};
@@ -466,7 +503,7 @@ http {{
             # replaces it with the PoW page.
         }}
 
-{cs_block}    }}
+{cs_block}{redis_block}    }}
 }}
 """
 
@@ -486,6 +523,8 @@ class Nginx:
         self.tarpit_max_conns = 256
         self.cs_feed = ""
         self.cs_max_bytes = "16m"
+        self.redis_host = ""
+        self.redis_port = 0
         self.process: subprocess.Popen[str] | None = None
         self.output_path = root / "nginx-output.log"
 
@@ -508,7 +547,8 @@ class Nginx:
         # CONTENT phase so PREACCESS — and the sentinel handler — runs).
         for name in ("tarpit", "tarpit-life", "tarpit-maze", "tarpit-shadow", "cs",
                      "block", "block-close", "block-shadow", "block-ttl",
-                     "route-strict", "route-lax", "pow"):
+                     "route-strict", "route-lax", "pow",
+                     "redis-block", "redis-pull"):
             (html / name).write_text("ok\n", encoding="ascii")
         # PoW bypass target (served in CONTENT phase once challenge passes).
         (html / "pow").write_text("pow-ok", encoding="ascii")
@@ -519,7 +559,9 @@ class Nginx:
             nginx_config(self.root, self.port, self.module, workers,
                          tarpit_max_conns=tarpit_max_conns,
                          cs_feed=cs_feed,
-                         cs_max_bytes=self.cs_max_bytes),
+                         cs_max_bytes=self.cs_max_bytes,
+                         redis_host=self.redis_host,
+                         redis_port=self.redis_port),
             encoding="ascii",
         )
 
@@ -1945,6 +1987,100 @@ def main() -> int:
             nginx3.stop()
 
     print("OK: sentinel Phase 3 crowdsec runtime tests passed")
+
+    # -----------------------------------------------------------------------
+    # TEST 20 - Redis multi-box shared state (separate nginx + a local
+    # redis-server). Exercises BOTH directions on one identity (127.0.0.1):
+    #   PUSH: an enforce-mode local block fires 403 and publishes the ban to
+    #         Redis (asserted via redis-cli GET).
+    #   PULL: that published key is pulled back into the crowdsec zone on the
+    #         next tick; a CLEAN request (weight_bot 0) is then blocked too,
+    #         proving a peer-originated ban reaches the request path.
+    # Skipped (not failed) if redis-server / redis-cli are unavailable.
+    # -----------------------------------------------------------------------
+    redis_bin = shutil.which("redis-server")
+    redis_cli = shutil.which("redis-cli")
+    if redis_bin is None or redis_cli is None:
+        print("SKIP: TEST 20 redis multi-box (redis-server/redis-cli not found)")
+        return 0
+
+    with tempfile.TemporaryDirectory(prefix="sentinel-ci-p4-") as tmp4:
+        root4 = pathlib.Path(tmp4)
+        redis_port = args.port + 100
+        redis_proc = subprocess.Popen(
+            [redis_bin, "--port", str(redis_port), "--save", "",
+             "--appendonly", "no", "--bind", "127.0.0.1",
+             "--dir", str(root4)],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+        def rcli(*cmd: str) -> str:
+            out = subprocess.run([redis_cli, "-p", str(redis_port), *cmd],
+                                 capture_output=True, text=True, timeout=5)
+            return out.stdout.strip()
+
+        nginx4 = Nginx(binary, module, root4 / "server", args.port + 3,
+                       args.runner, args.single_process)
+        nginx4.redis_host = "127.0.0.1"
+        nginx4.redis_port = redis_port
+        port4 = args.port + 3
+
+        try:
+            wait_port(redis_port)
+            rcli("FLUSHALL")
+
+            nginx4.write_config()
+            nginx4.config_test()
+            nginx4.start()
+            time.sleep(2.5)   # let the worker connect to redis + first tick
+
+            # --- PUSH: enforce-mode local block publishes the ban. ---
+            st, hdr, _ = fetch(port4, "/redis-block",
+                               extra_headers={"User-Agent": "sqlmap/1.0"})
+            if st != 403:
+                raise AssertionError(
+                    f"TEST 20 push: bot UA expected 403 block, got {st}")
+            # Allow the flush tick (interval=1s) to drain the push ring.
+            deadline = time.monotonic() + 8.0
+            pushed = ""
+            while time.monotonic() < deadline:
+                pushed = rcli("GET", "sentinel:ban:127.0.0.1")
+                if pushed:
+                    break
+                time.sleep(0.5)
+            if not pushed or "ban" not in pushed:
+                raise AssertionError(
+                    f"TEST 20 push: ban not published to Redis (got {pushed!r})")
+            print(f"  TEST 20 push: PASS (403 -> redis key {pushed!r})")
+
+            # --- PULL: the published key flows back into the crowdsec zone; a
+            # clean request (weight_bot 0) is now blocked by the pulled ban. ---
+            deadline = time.monotonic() + 8.0
+            pulled_block = False
+            while time.monotonic() < deadline:
+                st, _, _ = fetch(port4, "/redis-pull",
+                                 extra_headers={"User-Agent": "Mozilla/5.0"})
+                if st == 403:
+                    pulled_block = True
+                    break
+                time.sleep(0.5)
+            if not pulled_block:
+                raise AssertionError(
+                    "TEST 20 pull: clean request was not blocked by the pulled "
+                    f"ban (last status {st})")
+            print("  TEST 20 pull: PASS (clean req blocked by peer ban)")
+
+            nginx4.stop()
+            nginx4.assert_clean_logs()
+
+        finally:
+            nginx4.stop()
+            redis_proc.terminate()
+            try:
+                redis_proc.wait(timeout=5)
+            except Exception:
+                redis_proc.kill()
+
+    print("OK: sentinel TEST 20 redis multi-box passed")
     return 0
 
 

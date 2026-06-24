@@ -131,6 +131,66 @@
 #define NGX_SENTINEL_FEED_HEADER  "# sentinel-crowdsec-feed v1"
 
 /* -------------------------------------------------------------------------
+ * Redis multi-box shared state (sentinel_redis.c)
+ *
+ * Shares ban state across nginx hosts via a Redis instance. Two directions,
+ * both OUT-OF-BAND on a per-worker timer bound to nginx's event loop with
+ * async hiredis — NEVER any synchronous network I/O in the request path:
+ *   PULL: timer SCANs `prefix:ban:*` keys, upserts each into the bound
+ *         crowdsec shm zone (mirroring the existing crowdsec node shape, so it
+ *         feeds the existing w_crowdsec scoring tier — no new weight/zone).
+ *   PUSH: the request path enqueues LOCALLY-ORIGINATED block decisions into a
+ *         fixed shm ring; the timer drains it and `SET prefix:ban:<ip> .. EX`.
+ * Ban-loop guard: a node upserted by a PULL is flagged so the PUSH side never
+ * re-publishes it (only locally-originated decisions are pushed).
+ * Fail-OPEN throughout: if Redis is down the module degrades to per-host shm.
+ * ---------------------------------------------------------------------- */
+
+/* Refresh / flush tick (seconds). */
+#define NGX_SENTINEL_REDIS_DEFAULT_INTERVAL       10
+#define NGX_SENTINEL_REDIS_MIN_INTERVAL           1
+#define NGX_SENTINEL_REDIS_MAX_INTERVAL           3600
+
+/* TTL applied to pushed ban keys (seconds). */
+#define NGX_SENTINEL_REDIS_DEFAULT_TTL            3600
+#define NGX_SENTINEL_REDIS_MIN_TTL                60
+#define NGX_SENTINEL_REDIS_MAX_TTL                86400
+
+/* Default Redis port + key prefix. */
+#define NGX_SENTINEL_REDIS_DEFAULT_PORT           6379
+#define NGX_SENTINEL_REDIS_DEFAULT_PREFIX         "sentinel"
+
+/* Reconnect backoff bounds (ms) — exponential, capped. */
+#define NGX_SENTINEL_REDIS_BACKOFF_MIN_MS         500
+#define NGX_SENTINEL_REDIS_BACKOFF_MAX_MS         30000
+
+/* SCAN COUNT hint per pull cursor step. */
+#define NGX_SENTINEL_REDIS_SCAN_COUNT             256
+
+/* Push ring capacity (entries). Request path drops on full (fail-open); the
+ * timer drains it every interval, so this only needs to absorb one interval's
+ * worth of local block decisions. */
+#define NGX_SENTINEL_REDIS_PUSH_RING              4096
+
+/* A single queued local ban awaiting PUSH. Stored as a canonical IP string
+ * (NUL-terminated, bounded by NGX_SOCKADDR_STRLEN) plus its action + ttl. */
+typedef struct {
+    u_char      ip[NGX_SOCKADDR_STRLEN];
+    u_short     ip_len;
+    u_char      action;     /* NGX_SENTINEL_CS_* */
+    time_t      expiry;     /* absolute epoch the ban runs until */
+} ngx_sentinel_redis_push_t;
+
+/* Shared push ring (one per redis-bound location set; SPMC across workers,
+ * guarded by its own shpool mutex). head == tail => empty. */
+typedef struct {
+    ngx_uint_t                 head;   /* next slot a worker writes  */
+    ngx_uint_t                 tail;   /* next slot the timer drains */
+    ngx_uint_t                 dropped;/* overflow counter (telemetry) */
+    ngx_sentinel_redis_push_t  ring[NGX_SENTINEL_REDIS_PUSH_RING];
+} ngx_sentinel_redis_shctx_t;
+
+/* -------------------------------------------------------------------------
  * Phase 2 — Tarpit constants
  * ---------------------------------------------------------------------- */
 
@@ -179,6 +239,8 @@ typedef struct {
     ngx_uint_t         event_count;
     ngx_uint_t         cs_generation; /* crowdsec mark-and-sweep stamp (0 else) */
     u_char             cs_action;     /* crowdsec action tier (0 for errrate)   */
+    u_char             redis_pulled;  /* 1 if this ban came from a Redis PULL —
+                                       * ban-loop guard: never PUSH it back     */
     u_short            key_len;
     u_char             data[1];   /* key bytes then event timestamps (time_t[]) */
 } ngx_sentinel_node_t;
@@ -399,6 +461,17 @@ typedef struct {
     ngx_str_t                pow_secret;     /* HMAC key (empty = off) */
     ngx_int_t                pow_difficulty; /* required leading zero bits */
     ngx_int_t                pow_ttl;        /* challenge-bucket + cookie TTL (s) */
+
+    /* Redis multi-box shared state. Enabled iff redis_host is set
+     * (sentinel_redis host[:port];). Mirrors pulled bans into cs_zone and
+     * pushes locally-originated bans out. All I/O is async on a worker timer. */
+    ngx_str_t                redis_host;     /* host (empty = off)             */
+    ngx_int_t                redis_port;     /* TCP port                       */
+    ngx_str_t                redis_password; /* AUTH password (empty = none)   */
+    ngx_str_t                redis_prefix;   /* key namespace (def "sentinel") */
+    ngx_int_t                redis_interval; /* pull/flush tick (seconds)      */
+    ngx_int_t                redis_ttl;      /* TTL for pushed ban keys (s)    */
+    ngx_shm_zone_t          *redis_push_zone;/* dedicated push-ring shm zone   */
 } ngx_sentinel_loc_conf_t;
 
 /* -------------------------------------------------------------------------
@@ -641,12 +714,14 @@ ngx_int_t sentinel_tarpit_init_process(ngx_cycle_t *cycle);
 
 /*
  * sentinel_shm_crowdsec_upsert — insert/update a crowdsec ban node for `key`.
- * Sets blocked_until=expiry, cs_action, stamps cs_generation. Caller holds the
+ * Sets blocked_until=expiry, cs_action, stamps cs_generation, and marks
+ * node->redis_pulled (1 when the ban originates from a Redis PULL — used as the
+ * ban-loop guard so the PUSH side never re-publishes it). Caller holds the
  * zone lock. Returns NGX_OK (stored), NGX_ERROR (zone full / bad args).
  */
 ngx_int_t sentinel_shm_crowdsec_upsert(ngx_sentinel_zone_t *zone,
     ngx_str_t *key, time_t expiry, u_char action, ngx_uint_t generation,
-    time_t now);
+    time_t now, u_char redis_pulled);
 
 /*
  * sentinel_shm_crowdsec_sweep — delete crowdsec nodes whose cs_generation does
@@ -686,6 +761,33 @@ void sentinel_crowdsec_signal(ngx_http_request_t *r,
  * every sentinel location that has a crowdsec feed configured.
  */
 ngx_int_t sentinel_crowdsec_init_process(ngx_cycle_t *cycle);
+
+/* -------------------------------------------------------------------------
+ * Redis multi-box shared state (sentinel_redis.c)
+ * ---------------------------------------------------------------------- */
+
+/*
+ * sentinel_redis_init_zone — shm init callback for the push-ring zone.
+ */
+ngx_int_t sentinel_redis_init_zone(ngx_shm_zone_t *shm_zone, void *data);
+
+/*
+ * sentinel_redis_init_process — arm the per-worker Redis sync timer for every
+ * sentinel location that has `sentinel_redis` configured. Establishes the async
+ * hiredis connection bound to nginx's event loop. Fail-open (returns NGX_OK on
+ * any setup error; the request path keeps using per-host shm).
+ */
+ngx_int_t sentinel_redis_init_process(ngx_cycle_t *cycle);
+
+/*
+ * sentinel_redis_enqueue_ban — request-path hook: queue a LOCALLY-ORIGINATED
+ * ban (key=canonical client IP) into the push ring for the next flush tick.
+ * Non-blocking, lock-bounded, drops on full (fail-open). No network here.
+ * Called from the BLOCK enforcement path only when Redis push is enabled and
+ * the ban did NOT originate from a Redis pull (ban-loop guard upstream).
+ */
+void sentinel_redis_enqueue_ban(ngx_sentinel_loc_conf_t *lcf,
+    ngx_str_t *ip, u_char action, time_t expiry);
 
 /* -------------------------------------------------------------------------
  * Variable index (set by ngx_http_sentinel_module.c, used by sub-files)

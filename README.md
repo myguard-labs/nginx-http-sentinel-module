@@ -495,6 +495,62 @@ oversized / stale feed → log + keep the last-good table (fail-open).
 | `sentinel_crowdsec_max_bytes N;` | `16m` | Feed size cap; a larger file is rejected (fail-open). |
 | `sentinel_weight_crowdsec N;` | `100` | Weight of a CrowdSec hit (scaled by action tier) in the score. |
 
+### Redis multi-box shared state (out-of-band)
+
+When several nginx hosts front the same site, a ban learned on one box should
+protect the others. `sentinel_redis` shares ban state across hosts through a
+single Redis instance — **both directions, strictly out-of-band**: a per-worker
+timer drives an async [hiredis](https://github.com/redis/hiredis) connection
+bound to nginx's own event loop. There is **never** any synchronous network I/O
+in the request path; if Redis is unreachable every operation is a no-op and the
+module degrades cleanly to per-host shared memory (fail-open), reconnecting with
+exponential backoff.
+
+- **Pull** (timer): `SCAN <prefix>:ban:*`, `GET` each, and upsert the ban into
+  the local CrowdSec ban table. Pulled bans flow through the existing
+  `sentinel_weight_crowdsec` scoring tier — no new weight or zone. This requires
+  a `sentinel_crowdsec_zone` declared in `http {}` (the same table the feed uses;
+  sentinel auto-binds it).
+- **Push** (timer): a local **BLOCK** decision in enforce mode is queued in a
+  shared-memory ring and flushed as `SET <prefix>:ban:<ip> "<action> <expiry>"
+  EX <ttl>`. **Ban-loop guard:** a block driven by a CrowdSec hit (i.e. an
+  externally-sourced ban — from the feed or a Redis pull) is **never**
+  re-published, so two boxes can't echo a ban back and forth forever. Only
+  locally-originated decisions are pushed.
+
+A pulled ban is marked internally so it is exempt from re-push; the request path
+is untouched by either direction (it only ever reads the local CrowdSec table).
+
+```nginx
+http {
+    sentinel_crowdsec_zone cs:4m;          # ban table (shared with feed, if any)
+    server {
+        location / {
+            sentinel on;
+            sentinel_mode enforce;
+            sentinel_redis 10.0.0.9:6379;   # Redis endpoint (host[:port])
+            sentinel_redis_password "${REDIS_PW}";
+            sentinel_redis_interval 10;     # pull + flush tick (seconds)
+            sentinel_redis_ttl 3600;        # TTL on pushed ban keys
+            sentinel_redis_prefix sentinel; # key namespace
+            # ... weights / thresholds ...
+        }
+    }
+}
+```
+
+| Directive | Default | Description |
+|---|---|---|
+| `sentinel_redis host[:port];` | — | Enable Redis multi-box shared state and set the endpoint. Requires a `sentinel_crowdsec_zone`. One endpoint per worker (the first configured wins). |
+| `sentinel_redis_password <pw>;` | — | Optional `AUTH` password. |
+| `sentinel_redis_prefix <ns>;` | `sentinel` | Key namespace (`<prefix>:ban:<ip>`). |
+| `sentinel_redis_interval s;` | `10` | Pull/flush tick. Bounds: 1–3600 s. |
+| `sentinel_redis_ttl s;` | `3600` | TTL applied to pushed ban keys. Bounds: 60–86400 s. |
+
+> **Build dependency:** the Redis integration links `libhiredis`
+> (`Depends: libhiredis*` on the packaged build). Reference a password via an
+> nginx variable / env-templated config — never hard-code it.
+
 ### Scoring model
 
 ```
