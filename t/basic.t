@@ -160,3 +160,29 @@ sentinel_velocity: unknown velocity zone "nosuchzone"
 --- must_die
 --- error_log
 sentinel_velocity: unknown velocity zone "nosuchzone"
+
+=== TEST 10: structured-decision-log variables all resolve
+--- http_config
+    sentinel_zone test:1m;
+--- config
+    sentinel on;
+    sentinel_mode shadow;
+    add_header X-Bot       $sentinel_bot;
+    add_header X-Scanner   $sentinel_scanner;
+    add_header X-Errrate   $sentinel_errrate;
+    add_header X-Crowdsec  $sentinel_crowdsec;
+    add_header X-CsAction  $sentinel_crowdsec_action;
+    location = /.git/config {
+        return 200 "decision";
+    }
+--- request
+GET /.git/config
+--- more_headers
+User-Agent: sqlmap/1.7
+--- response_headers_like
+X-Bot: 1
+X-Scanner: 1
+X-Errrate: \d+
+X-Crowdsec: 0
+X-CsAction: none
+--- error_code: 200
