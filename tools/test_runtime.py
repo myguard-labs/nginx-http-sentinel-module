@@ -112,6 +112,15 @@ http {{
 
     sentinel_zone main:1m;
     sentinel_velocity_zone vzone:1m rate=3 window=60;
+
+    # TEST 15 (ASN signal): synthesize a geoip2-style ASN variable from a test
+    # header so the suite exercises sentinel_asn's complex-value read + list
+    # match WITHOUT a libmaxminddb/geoip2 build dependency. In production the
+    # operator maps $geoip2_asn here instead.
+    map $http_x_test_asn $test_asn {{
+        default "";
+        "~^[0-9]+$" $http_x_test_asn;
+    }}
 {cs_zone}
 
     server {{
@@ -374,6 +383,21 @@ http {{
             sentinel_mode enforce;
             sentinel_threshold challenge=900 tarpit=950 block=990;
             sentinel_weight_bot 0;
+        }}
+
+        # TEST 15 (ASN signal): shadow mode. AS16509 is in the flagged list;
+        # AS64500 is not. weight_bot/velocity zeroed so the delta is purely the
+        # ASN term (default w_asn 35). The client controls the ASN via the
+        # X-Test-ASN header, fed through $test_asn into sentinel_asn.
+        location = /asn {{
+            sentinel on;
+            sentinel_mode shadow;
+            sentinel_weight_bot 0;
+            sentinel_weight_velocity 0;
+            sentinel_asn $test_asn;
+            sentinel_datacenter_asn 16509 14618 15169;
+            access_log {root}/logs/asn.log sentinelvars;
+            return 200 "asn";
         }}
 
 {cs_block}    }}
@@ -1310,6 +1334,42 @@ def main() -> int:
                     f"(status 0/444), got {close_status}")
             print("  TEST 10 block-enforce: PASS "
                   f"(block=403, shadow=200, close={close_status})")
+
+            # TEST 15: ASN signal. A request carrying X-Test-ASN: 16509 (in the
+            # flagged list) must score >= w_asn (35); X-Test-ASN: 64500 (not in
+            # the list) and a request with no ASN header must both score 0.
+            # weight_bot/velocity are zeroed in /asn, so the score IS the ASN term.
+            fetch(args.port, "/asn", extra_headers={"X-Test-ASN": "16509"})
+            fetch(args.port, "/asn", extra_headers={"X-Test-ASN": "64500"})
+            fetch(args.port, "/asn")
+            time.sleep(0.3)
+
+            asn_log = root / "server" / "logs" / "asn.log"
+            if not asn_log.exists():
+                raise AssertionError("asn.log not written")
+            aslines = [ln.split() for ln in
+                       asn_log.read_text(encoding="utf-8").splitlines()
+                       if ln.strip()]
+            if len(aslines) < 3:
+                raise AssertionError(
+                    f"asn.log: expected >= 3 lines, got {len(aslines)}")
+            asn_hit   = int(aslines[0][1])   # AS16509 -> flagged
+            asn_miss  = int(aslines[1][1])   # AS64500 -> not flagged
+            asn_none  = int(aslines[2][1])   # no header -> empty -> off
+            # The shared 127.0.0.1 identity carries accumulated errrate from
+            # earlier 404 tests, so assert the flagged DELTA (>= w_asn 35) over
+            # the unflagged/no-header controls rather than an absolute score.
+            # miss and none must be EQUAL (both omit the ASN term).
+            if asn_miss != asn_none:
+                raise AssertionError(
+                    f"TEST 15 asn: unflagged and missing ASN must score equally; "
+                    f"got miss={asn_miss} none={asn_none}")
+            if asn_hit - asn_miss < 35:
+                raise AssertionError(
+                    f"TEST 15 asn: flagged AS16509 must exceed unflagged control "
+                    f"by >= 35 (w_asn); got hit={asn_hit} miss={asn_miss}")
+            print(f"  TEST 15 asn: PASS "
+                  f"(hit={asn_hit}, miss={asn_miss}, none={asn_none})")
 
             # TEST 13: per-route policy — same bot UA, opposite verdicts in two
             # sibling locations (strict blocks, lax allows).

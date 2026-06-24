@@ -60,6 +60,7 @@
 #define NGX_SENTINEL_DEFAULT_W_HEADER  25    /* request-header anomaly          */
 #define NGX_SENTINEL_DEFAULT_W_HONEYPOT 90   /* decoy-URL (honeypot) hit        */
 #define NGX_SENTINEL_DEFAULT_W_VELOCITY 30   /* request-rate abuse: meaningful but below scanner/honeypot */
+#define NGX_SENTINEL_DEFAULT_W_ASN     35    /* request from a flagged datacenter/abuse ASN */
 #define NGX_SENTINEL_VELOCITY_DEFAULT_THRESHOLD 100  /* requests per window */
 #define NGX_SENTINEL_VELOCITY_DEFAULT_WINDOW    10   /* seconds */
 
@@ -209,6 +210,10 @@ typedef struct {
     /* Velocity: request rate exceeded the configured threshold */
     ngx_flag_t  velocity_exceeded;
 
+    /* ASN: client's ASN (from an operator-supplied geoip2 variable) matched
+     * the operator's flagged datacenter/abuse-ASN list */
+    ngx_flag_t  datacenter_asn;
+
     /* Allowlist: client IP matched an operator-trusted CIDR (forces score 0,
      * unless a CrowdSec ban is present — see sentinel_score.c) */
     ngx_flag_t  allowlisted;
@@ -259,6 +264,7 @@ typedef struct {
     ngx_int_t  header;    /* added once if header_anomaly  */
     ngx_int_t  honeypot;  /* added once if honeypot        */
     ngx_int_t  velocity;  /* added once if velocity_exceeded */
+    ngx_int_t  asn;       /* added once if datacenter_asn      */
     ngx_int_t  crowdsec;  /* base weight for a crowdsec ban hit (tiered) */
 } ngx_sentinel_weights_t;
 
@@ -298,6 +304,12 @@ typedef struct {
 
     /* Allowlist: operator-trusted client CIDRs (empty = signal off) */
     ngx_array_t              allow_cidrs;         /* ngx_cidr_t[] trusted ranges */
+
+    /* ASN signal: operator points sentinel_asn at a geoip2 ASN variable; the
+     * value is parsed as an unsigned ASN at request time and matched against
+     * asn_list. No libmaxminddb link — the geoip2 module owns the DB. */
+    ngx_http_complex_value_t *asn_source;         /* NULL = signal off */
+    ngx_array_t              asn_list;            /* ngx_uint_t[] flagged ASNs */
 
     /* Phase 2 — tarpit parameters */
     ngx_int_t                tarpit_max_conns;    /* global cap across workers      */
@@ -437,6 +449,20 @@ void sentinel_allowlist_signal(ngx_http_request_t *r,
  * request. Fail-open: NULL args or no vel_zone → velocity_exceeded stays 0.
  */
 void sentinel_velocity_signal(ngx_http_request_t *r,
+    ngx_sentinel_loc_conf_t *lcf, ngx_sentinel_inputs_t *inputs);
+
+/* -------------------------------------------------------------------------
+ * ASN API (sentinel_asn.c)
+ * ---------------------------------------------------------------------- */
+
+/*
+ * sentinel_asn_signal — evaluate lcf->asn_source (an operator-supplied geoip2
+ * ASN variable), parse it as an unsigned ASN, and set inputs->datacenter_asn = 1
+ * if it matches any value in lcf->asn_list. No libmaxminddb link, no network,
+ * no malloc in the request path. Fail-open: NULL args / no source / empty list /
+ * empty or non-numeric value → datacenter_asn = 0.
+ */
+void sentinel_asn_signal(ngx_http_request_t *r,
     ngx_sentinel_loc_conf_t *lcf, ngx_sentinel_inputs_t *inputs);
 
 /* -------------------------------------------------------------------------

@@ -55,6 +55,10 @@ static char *sentinel_conf_honeypot(ngx_conf_t *cf,
     ngx_command_t *cmd, void *conf);
 static char *sentinel_conf_allowlist(ngx_conf_t *cf,
     ngx_command_t *cmd, void *conf);
+static char *sentinel_conf_asn_source(ngx_conf_t *cf,
+    ngx_command_t *cmd, void *conf);
+static char *sentinel_conf_datacenter_asn(ngx_conf_t *cf,
+    ngx_command_t *cmd, void *conf);
 static char *ngx_sentinel_set_velocity_zone(ngx_conf_t *cf,
     ngx_command_t *cmd, void *conf);
 static char *ngx_sentinel_set_velocity_bind(ngx_conf_t *cf,
@@ -77,6 +81,8 @@ static ngx_int_t ngx_sentinel_var_header(ngx_http_request_t *r,
 static ngx_int_t ngx_sentinel_var_honeypot(ngx_http_request_t *r,
     ngx_http_variable_value_t *v, uintptr_t data);
 static ngx_int_t ngx_sentinel_var_velocity(ngx_http_request_t *r,
+    ngx_http_variable_value_t *v, uintptr_t data);
+static ngx_int_t ngx_sentinel_var_asn(ngx_http_request_t *r,
     ngx_http_variable_value_t *v, uintptr_t data);
 static ngx_int_t ngx_sentinel_var_allowlist(ngx_http_request_t *r,
     ngx_http_variable_value_t *v, uintptr_t data);
@@ -203,6 +209,30 @@ static ngx_command_t ngx_sentinel_commands[] = {
       ngx_conf_set_num_slot,
       NGX_HTTP_LOC_CONF_OFFSET,
       offsetof(ngx_sentinel_loc_conf_t, weights.velocity),
+      NULL },
+
+    /* sentinel_weight_asn N; — added once if datacenter_asn */
+    { ngx_string("sentinel_weight_asn"),
+      NGX_HTTP_MAIN_CONF | NGX_HTTP_SRV_CONF | NGX_HTTP_LOC_CONF | NGX_CONF_TAKE1,
+      ngx_conf_set_num_slot,
+      NGX_HTTP_LOC_CONF_OFFSET,
+      offsetof(ngx_sentinel_loc_conf_t, weights.asn),
+      NULL },
+
+    /* sentinel_asn <variable>; — geoip2 ASN source variable (e.g. $geoip2_asn) */
+    { ngx_string("sentinel_asn"),
+      NGX_HTTP_MAIN_CONF | NGX_HTTP_SRV_CONF | NGX_HTTP_LOC_CONF | NGX_CONF_TAKE1,
+      sentinel_conf_asn_source,
+      NGX_HTTP_LOC_CONF_OFFSET,
+      0,
+      NULL },
+
+    /* sentinel_datacenter_asn N [N ...]; — flagged datacenter/abuse ASN list */
+    { ngx_string("sentinel_datacenter_asn"),
+      NGX_HTTP_MAIN_CONF | NGX_HTTP_SRV_CONF | NGX_HTTP_LOC_CONF | NGX_CONF_1MORE,
+      sentinel_conf_datacenter_asn,
+      NGX_HTTP_LOC_CONF_OFFSET,
+      0,
       NULL },
 
     /* sentinel_velocity <zone_name>; — bind this location to a velocity zone (opt-in) */
@@ -419,6 +449,9 @@ static ngx_http_variable_t ngx_sentinel_vars[] = {
     { ngx_string("sentinel_velocity"), NULL,
       ngx_sentinel_var_velocity, 0, NGX_HTTP_VAR_NOCACHEABLE, 0 },
 
+    { ngx_string("sentinel_asn"), NULL,
+      ngx_sentinel_var_asn, 0, NGX_HTTP_VAR_NOCACHEABLE, 0 },
+
     { ngx_string("sentinel_allowlist"), NULL,
       ngx_sentinel_var_allowlist, 0, NGX_HTTP_VAR_NOCACHEABLE, 0 },
 
@@ -495,6 +528,7 @@ ngx_sentinel_get_ctx(ngx_http_request_t *r)
     sentinel_honeypot_signal(r, lcf, &ctx->inputs);
     sentinel_allowlist_signal(r, lcf, &ctx->inputs);
     sentinel_velocity_signal(r, lcf, &ctx->inputs);
+    sentinel_asn_signal(r, lcf, &ctx->inputs);
     sentinel_crowdsec_signal(r, lcf, &ctx->inputs);
 
     /* Score + verdict (stub returns 0 -> always allow). */
@@ -644,6 +678,27 @@ ngx_sentinel_var_velocity(ngx_http_request_t *r, ngx_http_variable_value_t *v,
 
     v->len  = 1;
     v->data = (u_char *) (ctx->inputs.velocity_exceeded ? "1" : "0");
+    v->valid  = 1;
+    v->not_found   = 0;
+    v->no_cacheable = 0;
+
+    return NGX_OK;
+}
+
+static ngx_int_t
+ngx_sentinel_var_asn(ngx_http_request_t *r, ngx_http_variable_value_t *v,
+    uintptr_t data)
+{
+    ngx_sentinel_ctx_t  *ctx;
+
+    ctx = ngx_sentinel_get_ctx(r);
+    if (ctx == NULL) {
+        v->not_found = 1;
+        return NGX_OK;
+    }
+
+    v->len  = 1;
+    v->data = (u_char *) (ctx->inputs.datacenter_asn ? "1" : "0");
     v->valid  = 1;
     v->not_found   = 0;
     v->no_cacheable = 0;
@@ -851,7 +906,7 @@ ngx_sentinel_preaccess_handler(ngx_http_request_t *r)
     ngx_log_error(NGX_LOG_INFO, r->connection->log, 0,
                   "sentinel: score=%i verdict=%s ja4h=%s "
                   "shadow=%i errrate=%ui bot=%i scanner=%i header=%i "
-                  "honeypot=%i velocity=%i allowlist=%i crowdsec=%i cs_action=%ui",
+                  "honeypot=%i velocity=%i asn=%i allowlist=%i crowdsec=%i cs_action=%ui",
                   ctx->score,
                   verdict_strings[ctx->verdict],
                   ctx->inputs.ja4h,
@@ -862,6 +917,7 @@ ngx_sentinel_preaccess_handler(ngx_http_request_t *r)
                   (ngx_int_t) ctx->inputs.header_anomaly,
                   (ngx_int_t) ctx->inputs.honeypot,
                   (ngx_int_t) ctx->inputs.velocity_exceeded,
+                  (ngx_int_t) ctx->inputs.datacenter_asn,
                   (ngx_int_t) ctx->inputs.allowlisted,
                   (ngx_int_t) ctx->inputs.crowdsec_hit,
                   (ngx_uint_t) ctx->inputs.crowdsec_action);
@@ -1187,6 +1243,9 @@ ngx_sentinel_create_loc_conf(ngx_conf_t *cf)
     lcf->vel_zone        = NGX_CONF_UNSET_PTR;
     lcf->weights.velocity = NGX_CONF_UNSET;
 
+    /* asn_source NULL + asn_list empty via pcalloc; opt-in signal. */
+    lcf->weights.asn     = NGX_CONF_UNSET;
+
     lcf->cs_zone         = NGX_CONF_UNSET_PTR;
     lcf->cs_interval     = NGX_CONF_UNSET;
     lcf->cs_default_ttl  = NGX_CONF_UNSET;
@@ -1246,6 +1305,9 @@ ngx_sentinel_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
     ngx_conf_merge_value(conf->weights.velocity,
                          prev->weights.velocity,
                          NGX_SENTINEL_DEFAULT_W_VELOCITY);
+    ngx_conf_merge_value(conf->weights.asn,
+                         prev->weights.asn,
+                         NGX_SENTINEL_DEFAULT_W_ASN);
     ngx_conf_merge_ptr_value(conf->vel_zone, prev->vel_zone, NULL);
 
     /* inherit velocity binding name from parent location */
@@ -1289,6 +1351,14 @@ ngx_sentinel_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
     /* Inherit allow_cidrs from parent if not set locally. */
     if (conf->allow_cidrs.nelts == 0 && prev->allow_cidrs.nelts > 0) {
         conf->allow_cidrs = prev->allow_cidrs;
+    }
+
+    /* Inherit ASN source + flagged list from parent if not set locally. */
+    if (conf->asn_source == NULL) {
+        conf->asn_source = prev->asn_source;
+    }
+    if (conf->asn_list.nelts == 0 && prev->asn_list.nelts > 0) {
+        conf->asn_list = prev->asn_list;
     }
 
     ngx_conf_merge_value(conf->weights.crowdsec,
@@ -1996,6 +2066,84 @@ sentinel_conf_allowlist(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
                                "sentinel_allowlist: low address bits of \"%V\" "
                                "are meaningful", &value[i]);
         }
+    }
+
+    return NGX_CONF_OK;
+}
+
+/* -------------------------------------------------------------------------
+ * ASN directive handlers.
+ *
+ * sentinel_asn <variable>;  — compile the operator-supplied geoip2 ASN source
+ *                             into a complex value (evaluated per request).
+ * sentinel_datacenter_asn N [N ...];  — flagged ASN list (unsigned).
+ * ---------------------------------------------------------------------- */
+
+static char *
+sentinel_conf_asn_source(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
+{
+    ngx_sentinel_loc_conf_t           *lcf = conf;
+    ngx_str_t                         *value;
+    ngx_http_compile_complex_value_t   ccv;
+
+    if (lcf->asn_source != NULL) {
+        return "is duplicate";
+    }
+
+    value = cf->args->elts;
+
+    lcf->asn_source = ngx_palloc(cf->pool, sizeof(ngx_http_complex_value_t));
+    if (lcf->asn_source == NULL) {
+        return NGX_CONF_ERROR;
+    }
+
+    ngx_memzero(&ccv, sizeof(ngx_http_compile_complex_value_t));
+    ccv.cf = cf;
+    ccv.value = &value[1];
+    ccv.complex_value = lcf->asn_source;
+
+    if (ngx_http_compile_complex_value(&ccv) != NGX_OK) {
+        return NGX_CONF_ERROR;
+    }
+
+    return NGX_CONF_OK;
+}
+
+static char *
+sentinel_conf_datacenter_asn(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
+{
+    ngx_sentinel_loc_conf_t  *lcf = conf;
+    ngx_str_t                *value;
+    ngx_uint_t               *slot;
+    ngx_uint_t                i;
+    ngx_int_t                 v;
+
+    value = cf->args->elts;
+
+    for (i = 1; i < cf->args->nelts; i++) {
+
+        v = ngx_atoi(value[i].data, value[i].len);
+        if (v == NGX_ERROR || v <= 0) {
+            ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                               "sentinel_datacenter_asn: invalid ASN \"%V\"",
+                               &value[i]);
+            return NGX_CONF_ERROR;
+        }
+
+        if (lcf->asn_list.elts == NULL) {
+            if (ngx_array_init(&lcf->asn_list, cf->pool, 8,
+                               sizeof(ngx_uint_t)) != NGX_OK)
+            {
+                return NGX_CONF_ERROR;
+            }
+        }
+
+        slot = ngx_array_push(&lcf->asn_list);
+        if (slot == NULL) {
+            return NGX_CONF_ERROR;
+        }
+
+        *slot = (ngx_uint_t) v;
     }
 
     return NGX_CONF_OK;

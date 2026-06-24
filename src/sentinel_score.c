@@ -14,6 +14,7 @@
  *         + w_header   * header_anomaly
  *         + w_honeypot * honeypot
  *         + w_velocity * velocity_exceeded
+ *         + w_asn      * datacenter_asn
  *         + w_crowdsec * crowdsec_hit (action-tiered: see below)
  *
  * CrowdSec action tiering (keeps weaker actions out of the block band):
@@ -130,6 +131,11 @@ sentinel_score_compute(const ngx_sentinel_inputs_t *inputs,
     /* velocity_exceeded — rate limit exceeded */
     if (inputs->velocity_exceeded) {
         sentinel_score_add(&score, w->velocity);
+    }
+
+    /* datacenter_asn — request originates from a flagged datacenter/abuse ASN */
+    if (inputs->datacenter_asn) {
+        sentinel_score_add(&score, w->asn);
     }
 
     /* CrowdSec hit — action-tiered fraction of w_crowdsec (no block escalation

@@ -53,6 +53,7 @@ typedef int            ngx_flag_t;
 #define NGX_SENTINEL_DEFAULT_W_HEADER  25
 #define NGX_SENTINEL_DEFAULT_W_HONEYPOT 90
 #define NGX_SENTINEL_DEFAULT_W_VELOCITY 30
+#define NGX_SENTINEL_DEFAULT_W_ASN     35
 #define NGX_SENTINEL_DEFAULT_W_CROWDSEC 100
 
 #define NGX_SENTINEL_CS_NONE      0
@@ -81,6 +82,7 @@ typedef struct {
     ngx_flag_t  header_anomaly;
     ngx_flag_t  honeypot;
     ngx_flag_t  velocity_exceeded;
+    ngx_flag_t  datacenter_asn;
     ngx_flag_t  allowlisted;
     ngx_flag_t  crowdsec_hit;
     u_char      crowdsec_action;
@@ -100,6 +102,7 @@ typedef struct {
     ngx_int_t  header;
     ngx_int_t  honeypot;  /* added once if honeypot        */
     ngx_int_t  velocity;
+    ngx_int_t  asn;       /* added once if datacenter_asn   */
     ngx_int_t  crowdsec;
 } ngx_sentinel_weights_t;
 
@@ -155,6 +158,7 @@ make_lcf(ngx_int_t w_errrate, ngx_int_t w_blocked,
     lcf.weights.bot      = w_bot;
     lcf.weights.honeypot = 0;  /* caller sets explicitly when testing honeypot */
     lcf.weights.velocity = 0;  /* caller sets explicitly when testing velocity */
+    lcf.weights.asn      = 0;  /* caller sets explicitly when testing asn */
     lcf.weights.crowdsec = NGX_SENTINEL_DEFAULT_W_CROWDSEC;
     lcf.threshold.challenge = NGX_SENTINEL_DEFAULT_THRESH_CH;
     lcf.threshold.tarpit    = NGX_SENTINEL_DEFAULT_THRESH_TP;
@@ -479,6 +483,33 @@ main(void)
     inp.velocity_exceeded = 0;
     ASSERT_EQ("velocity=0 → 0",
               sentinel_score_compute(&inp, &lcf), 0);
+
+    /* ------------------------------------------------------------------
+     * (h2) ASN signal: inputs->datacenter_asn adds w_asn once.
+     * ------------------------------------------------------------------ */
+
+    /* datacenter_asn=1, weight=35 → score 35. */
+    lcf = make_lcf(0, 0, 0, 0);
+    lcf.weights.asn = NGX_SENTINEL_DEFAULT_W_ASN;
+    inp = make_inputs(0, 0, 0, 0, 0);
+    inp.datacenter_asn = 1;
+    ASSERT_EQ("asn only: 35",
+              sentinel_score_compute(&inp, &lcf),
+              NGX_SENTINEL_DEFAULT_W_ASN);
+
+    /* asn + bot combined: 35 + 30 = 65. */
+    lcf = make_lcf(0, 0, 0, NGX_SENTINEL_DEFAULT_W_BOT);
+    lcf.weights.asn = NGX_SENTINEL_DEFAULT_W_ASN;
+    inp = make_inputs(0, 0, 0, 1, 0);
+    inp.datacenter_asn = 1;
+    ASSERT_EQ("asn + bot: 35 + 30 = 65", sentinel_score_compute(&inp, &lcf), 65);
+
+    /* datacenter_asn=0 → no contribution. */
+    lcf = make_lcf(0, 0, 0, 0);
+    lcf.weights.asn = NGX_SENTINEL_DEFAULT_W_ASN;
+    inp = make_inputs(0, 0, 0, 0, 0);
+    inp.datacenter_asn = 0;
+    ASSERT_EQ("asn=0 → 0", sentinel_score_compute(&inp, &lcf), 0);
 
     /* ------------------------------------------------------------------
      * (i) Allowlist short-circuit: allowlisted forces 0, but a CrowdSec ban
