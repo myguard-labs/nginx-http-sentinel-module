@@ -78,6 +78,20 @@ sentinel_score_compute(const ngx_sentinel_inputs_t *inputs,
         return 0;
     }
 
+    /*
+     * Operator CIDR allowlist short-circuit.
+     *
+     * Unlike known_good_ua (a spoofable UA substring), allow_cidrs is a network-
+     * level assertion the operator made about source addresses — much stronger.
+     * It still must NOT nullify a CrowdSec ban, by the same reasoning: a deployed
+     * feed is the operator explicitly marking the IP malicious. If a trusted
+     * range is later found compromised, the ban wins. So short-circuit only when
+     * there is no CrowdSec hit.
+     */
+    if (inputs->allowlisted && !inputs->crowdsec_hit) {
+        return 0;
+    }
+
     w = &lcf->weights;
     score = 0;
 

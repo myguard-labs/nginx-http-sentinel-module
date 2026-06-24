@@ -251,6 +251,43 @@ http {{
             return 200 "velocity";
         }}
 
+        # Allowlist: client 127.0.0.1 is in the trusted CIDR, so even a honeypot
+        # hit (w=90) must short-circuit to score 0. The /allow-test/trap decoy
+        # would otherwise score 90; allowlist forces it back to 0.
+        location /allow-test {{
+            sentinel on;
+            sentinel_mode shadow;
+            sentinel_allowlist 127.0.0.1/32;
+            sentinel_honeypot /allow-test/trap;
+            sentinel_weight_errrate 0;
+            sentinel_weight_blocked 0;
+            sentinel_weight_scanner 0;
+            sentinel_weight_bot 0;
+            sentinel_weight_header 0;
+            sentinel_weight_honeypot 90;
+            sentinel_weight_velocity 0;
+            access_log {root}/logs/allow.log sentinelvars;
+            return 200 "allow";
+        }}
+
+        # Allowlist negative: client NOT in the trusted CIDR (10.0.0.0/8), so the
+        # honeypot hit scores normally (90).
+        location /allow-miss {{
+            sentinel on;
+            sentinel_mode shadow;
+            sentinel_allowlist 10.0.0.0/8;
+            sentinel_honeypot /allow-miss/trap;
+            sentinel_weight_errrate 0;
+            sentinel_weight_blocked 0;
+            sentinel_weight_scanner 0;
+            sentinel_weight_bot 0;
+            sentinel_weight_header 0;
+            sentinel_weight_honeypot 90;
+            sentinel_weight_velocity 0;
+            access_log {root}/logs/allowmiss.log sentinelvars;
+            return 200 "allowmiss";
+        }}
+
 {cs_block}    }}
 }}
 """
@@ -1009,6 +1046,39 @@ def main() -> int:
                     f"TEST 8 velocity: last request score must be >= 30 "
                     f"(w_velocity); got {last_vel_score}")
             print(f"  TEST 8 velocity: PASS (last score={last_vel_score})")
+
+            # TEST 9: allowlist — client 127.0.0.1 is in the trusted CIDR, so a
+            # honeypot hit on /allow-test/trap must short-circuit to score 0.
+            # On /allow-miss (CIDR 10.0.0.0/8 does NOT match), the same honeypot
+            # hit must score normally (>= 90).
+            fetch(args.port, "/allow-test/trap")
+            fetch(args.port, "/allow-miss/trap")
+            time.sleep(0.3)
+
+            allow_log = root / "server" / "logs" / "allow.log"
+            miss_log = root / "server" / "logs" / "allowmiss.log"
+            if not allow_log.exists() or not miss_log.exists():
+                raise AssertionError("allow.log / allowmiss.log not written")
+            alines = [ln.split() for ln in
+                      allow_log.read_text(encoding="utf-8").splitlines()
+                      if ln.strip()]
+            mlines = [ln.split() for ln in
+                      miss_log.read_text(encoding="utf-8").splitlines()
+                      if ln.strip()]
+            if not alines or not mlines:
+                raise AssertionError("allow/miss log empty")
+            allow_score = int(alines[-1][1])
+            miss_score = int(mlines[-1][1])
+            if allow_score != 0:
+                raise AssertionError(
+                    f"TEST 9 allowlist: matched client must short-circuit to 0; "
+                    f"got {allow_score}")
+            if miss_score < 90:
+                raise AssertionError(
+                    f"TEST 9 allowlist: non-matching CIDR must score honeypot "
+                    f">= 90; got {miss_score}")
+            print(f"  TEST 9 allowlist: PASS "
+                  f"(match={allow_score}, miss={miss_score})")
 
             nginx.stop()
             nginx.assert_clean_logs()
