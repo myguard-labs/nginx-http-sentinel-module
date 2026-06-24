@@ -70,13 +70,16 @@ Each = own small PR. Full catalog + config examples: the pitch page (DESIGN.md l
 - [x] velocity: per-LOCATION vel_zone binding — `sentinel_velocity <zone>;` opt-in dir, auto-bind removed, inherits to nested loc — PR #5, dev 2026-06-23
 - [x] velocity: edge — child-loc bad zone name silently inherited parent binding. Fixed: clear vel_zone before name resolution → unknown name now rejected. Runtime T8b covers it — PR #6, dev 2026-06-23
 - [ ] test harness: t/basic.t (Test::Nginx) is non-functional — all tests die with "sentinel directive is not allowed here" (module never load_module'd by harness). Either wire %%TEST_NGINX_LOAD_MODULES%% / main_config load, or drop t/*.t and rely on tools/test_runtime.py (current authority). Coverage currently lives in test_runtime.py + t/test_score.c unit
-- [ ] signals: HTTP/2 frame-order fingerprint; UA↔fingerprint coherence; datacenter/ASN (geoip2)
+- [ ] signals: HTTP/2 frame-order fingerprint (needs core surface, traffic-gated)
+- [x] signals: datacenter/ASN (geoip2) — `sentinel_asn $geoip2_asn;` + `sentinel_datacenter_asn N...;`; reads complex value, no libmaxminddb link, w_asn 35, $sentinel_asn var. Runtime TEST 15. PR #20, master 2026-06-24
+- [x] signals: UA↔request-shape coherence — UA claims a mainstream browser but the request lacks a real browser's header shape (no Accept/Accept-Language/gzip Accept-Encoding, or pre-HTTP/1.1) → w_coherence 40; structural heuristic, NO JA4H hash DB; new sentinel_coherence.c + $sentinel_coherence var. Runtime TEST 16. PR #21, master 2026-06-24
 - [x] actions: throttle (bandwidth-cap) — `sentinel_throttle_rate size;` forks the TARPIT verdict (enforce) to cap egress via native r->limit_rate instead of dripping; $sentinel_throttled var. Runtime TEST 12. PR #16, master 2026-06-24
 - [ ] actions: built-in proof-of-work challenge; cache-only origin-shield; tarpit maze mode; CrowdSec verdict feedback
 - [x] ops: TTL soft-bans — `sentinel_block_ttl S;` persists a self-ban (now+ttl) in the errrate zone on BLOCK/enforce; reuses errrate blocked_until → w_blocked re-block, no re-eval; fail-open if no zone; shadow never persists. Runtime TEST 11. PR #15, master 2026-06-24
 - [x] ops: per-route policy — all policy directives merge per-location via stock nginx inheritance (delivered by http/server/loc context widening); README section + runtime TEST 13 (same bot UA → strict=403, lax=200) lock the contract — PR, 2026-06-24
 - [x] ops: structured decision log — 14 NOCACHEABLE vars + JSON log_format example (PR #12/#13); throttled-field finish (example + t/basic.t TEST 10 cover $sentinel_throttled) — PR, 2026-06-24
-- [ ] ops: allowlist (verified search engines + monitoring); metrics → VTS/statsd/OTel
+- [x] ops: FCrDNS verify (verified search engines) — `sentinel_fcrdns <zone>;` async PTR+forward-confirm of self-declared crawlers (known_good_ua only); verdict cached in shm w/ TTL; spoofed verdict suppresses the known_good_ua score short-circuit; fail-open while pending / no resolver. New sentinel_fcrdns.c + $sentinel_fcrdns var + sentinel_fcrdns_zone/_ttl/_verify_suffix. Runtime TEST 17. PR #22, master 2026-06-24
+- [ ] ops: metrics → VTS/statsd/OTel
 
 ## Deprecation — standalone error-abuse
 - [ ] after sentinel error-rate signal proven in prod: announce deprecation,

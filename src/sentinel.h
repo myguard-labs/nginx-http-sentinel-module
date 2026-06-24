@@ -78,6 +78,22 @@
 #define NGX_SENTINEL_CS_CAPTCHA   2
 #define NGX_SENTINEL_CS_THROTTLE  3
 
+/* -------------------------------------------------------------------------
+ * FCrDNS (Forward-Confirmed reverse DNS) verdict tiers.
+ *
+ * Stored in the fcrdns verdict-cache node->cs_action field (reuses the
+ * crowdsec node shape). blocked_until is repurposed as the cache-entry expiry
+ * (now + fcrdns_ttl): once it lapses the verdict is re-resolved.
+ * ---------------------------------------------------------------------- */
+#define NGX_SENTINEL_FCRDNS_PENDING   0  /* no cached verdict (or expired)     */
+#define NGX_SENTINEL_FCRDNS_VERIFIED  1  /* PTR + forward both confirmed the IP */
+#define NGX_SENTINEL_FCRDNS_FAILED    2  /* PTR/forward mismatch or lookup fail */
+
+/* Default cache TTL for an FCrDNS verdict (seconds). */
+#define NGX_SENTINEL_FCRDNS_DEFAULT_TTL   3600
+/* Resolver timeout per lookup (ms). */
+#define NGX_SENTINEL_FCRDNS_RESOLVE_MSEC  5000
+
 /* Refresh tick (seconds). */
 #define NGX_SENTINEL_CROWDSEC_DEFAULT_INTERVAL    10
 #define NGX_SENTINEL_CROWDSEC_MIN_INTERVAL        1
@@ -202,6 +218,16 @@ typedef struct {
                                     * RDNS-verified yet, spoofable; gated on
                                     * !crowdsec_hit in sentinel_score_compute */
 
+    /* FCrDNS: forward-confirmed reverse-DNS verdict for the client IP, looked
+     * up ONLY when known_good_ua is set (confirm the crawler UA claim).
+     *   verified=1 → the known_good_ua short-circuit is trustworthy.
+     *   spoofed=1  → PTR/forward disproved the claim; DO NOT honor known_good_ua.
+     *   both 0     → no cached verdict yet (pending/disabled) → fail-open:
+     *                known_good_ua keeps its legacy (documented-spoofable)
+     *                behavior this request; the async lookup settles the cache. */
+    ngx_flag_t  fcrdns_verified;
+    ngx_flag_t  fcrdns_spoofed;
+
     /* Header-anomaly: suspicious/malformed request headers */
     ngx_flag_t  header_anomaly;
 
@@ -283,6 +309,7 @@ typedef struct {
     ngx_array_t   zones;        /* ngx_sentinel_zone_t[] (errrate)                  */
     ngx_array_t   cs_zones;     /* ngx_sentinel_zone_t[] (crowdsec, Phase 3)        */
     ngx_array_t   vel_zones;     /* ngx_sentinel_zone_t[] (velocity)             */
+    ngx_array_t   fcrdns_zones;  /* ngx_sentinel_zone_t[] (FCrDNS verdict cache) */
     ngx_atomic_t *tarpit_conns; /* per-worker sub-counters [NGX_MAX_PROCESSES]      */
                                 /* allocated in dedicated shm at sentinel_zone init  */
 } ngx_sentinel_main_conf_t;
@@ -317,6 +344,17 @@ typedef struct {
      * asn_list. No libmaxminddb link — the geoip2 module owns the DB. */
     ngx_http_complex_value_t *asn_source;         /* NULL = signal off */
     ngx_array_t              asn_list;            /* ngx_uint_t[] flagged ASNs */
+
+    /* FCrDNS verify: when on, a known_good_ua (self-declared crawler) triggers
+     * an async PTR + forward-confirm of the client IP. The verdict is cached in
+     * fcrdns_zone for fcrdns_ttl seconds. fcrdns_suffixes optionally restricts
+     * which resolved PTR names count as a real crawler (e.g. ".googlebot.com").
+     * Empty suffix list = accept any forward-confirmed name.
+     * Enabled iff fcrdns_zone is bound (sentinel_fcrdns <zone>;). */
+    ngx_sentinel_zone_t     *fcrdns_zone;         /* verdict-cache shm zone     */
+    ngx_str_t                fcrdns_zone_name;    /* pending name for bind      */
+    ngx_int_t                fcrdns_ttl;          /* verdict cache TTL (seconds) */
+    ngx_array_t              fcrdns_suffixes;     /* ngx_str_t[] allowed PTR suffixes */
 
     /* Phase 2 — tarpit parameters */
     ngx_int_t                tarpit_max_conns;    /* global cap across workers      */
@@ -470,6 +508,36 @@ void sentinel_velocity_signal(ngx_http_request_t *r,
  * empty or non-numeric value → datacenter_asn = 0.
  */
 void sentinel_asn_signal(ngx_http_request_t *r,
+    ngx_sentinel_loc_conf_t *lcf, ngx_sentinel_inputs_t *inputs);
+
+/* -------------------------------------------------------------------------
+ * FCrDNS API (sentinel_fcrdns.c)
+ * ---------------------------------------------------------------------- */
+
+/*
+ * sentinel_shm_fcrdns_get — read the cached FCrDNS verdict for `key`.
+ * Returns NGX_SENTINEL_FCRDNS_{PENDING,VERIFIED,FAILED}. PENDING when no
+ * (unexpired) entry exists. Takes the zone lock. Fail-open: zone error → PENDING.
+ */
+ngx_uint_t sentinel_shm_fcrdns_get(ngx_sentinel_zone_t *zone,
+    ngx_str_t *key, time_t now);
+
+/*
+ * sentinel_shm_fcrdns_set — cache an FCrDNS verdict for `key` until now+ttl.
+ * Takes the zone lock. Returns NGX_OK / NGX_ERROR (caller fails open).
+ */
+ngx_int_t sentinel_shm_fcrdns_set(ngx_sentinel_zone_t *zone,
+    ngx_str_t *key, ngx_uint_t verdict, time_t now, time_t ttl);
+
+/*
+ * sentinel_fcrdns_signal — when lcf->fcrdns is on AND inputs->known_good_ua is
+ * set, read the cached verdict and set inputs->fcrdns_verified / fcrdns_spoofed.
+ * On a PENDING/expired verdict it kicks off an async PTR+forward resolve (which
+ * settles the cache for next time) and leaves both flags 0 (fail-open). Never
+ * blocks the request on DNS. Fail-open on: fcrdns off, no known_good_ua, no
+ * zone, no resolver, NULL args.
+ */
+void sentinel_fcrdns_signal(ngx_http_request_t *r,
     ngx_sentinel_loc_conf_t *lcf, ngx_sentinel_inputs_t *inputs);
 
 /* -------------------------------------------------------------------------

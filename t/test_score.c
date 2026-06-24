@@ -80,6 +80,8 @@ typedef struct {
     ngx_flag_t  scanner_path;
     ngx_flag_t  bot_ua;
     ngx_flag_t  known_good_ua;
+    ngx_flag_t  fcrdns_verified;
+    ngx_flag_t  fcrdns_spoofed;
     ngx_flag_t  header_anomaly;
     ngx_flag_t  honeypot;
     ngx_flag_t  velocity_exceeded;
@@ -210,6 +212,26 @@ main(void)
     inp = make_inputs(1, 0, 0, 0, 0);
     score = sentinel_score_compute(&inp, &lcf);
     ASSERT_EQ("no known_good_ua, errrate=1 → non-zero", score != 0, 1);
+
+    /* FCrDNS: a SPOOFED verdict suppresses the known_good_ua short-circuit —
+     * the request scores as the bot it is. */
+    inp = make_inputs(64, 1, 1, 1, 1);   /* all signals + known_good_ua */
+    inp.fcrdns_spoofed = 1;
+    score = sentinel_score_compute(&inp, &lcf);
+    ASSERT_EQ("fcrdns spoofed: known_good_ua no longer short-circuits",
+              score != 0, 1);
+
+    /* FCrDNS: a VERIFIED verdict leaves the short-circuit intact (real crawler). */
+    inp = make_inputs(64, 1, 1, 1, 1);
+    inp.fcrdns_verified = 1;
+    score = sentinel_score_compute(&inp, &lcf);
+    ASSERT_EQ("fcrdns verified: known_good_ua still short-circuits", score, 0);
+
+    /* FCrDNS: pending (both 0) keeps legacy fail-open short-circuit. */
+    inp = make_inputs(64, 1, 1, 1, 1);
+    score = sentinel_score_compute(&inp, &lcf);
+    ASSERT_EQ("fcrdns pending: known_good_ua short-circuits (fail-open)",
+              score, 0);
 
     /* ------------------------------------------------------------------
      * (b) Weighted sum is correct for a known input set.
