@@ -219,6 +219,41 @@ typedef enum {
     NGX_SENTINEL_VERDICT_BLOCK     = 3
 } ngx_sentinel_verdict_e;
 
+/* -------------------------------------------------------------------------
+ * Prometheus metrics — counter layout
+ *
+ * One flat ngx_atomic_t array, lock-free (fetch_add to bump, plain read to
+ * scrape). Indices are stable; the status handler emits a fixed exposition.
+ * Counters are best-effort observability — they NEVER block or fail a request.
+ * ---------------------------------------------------------------------- */
+
+typedef enum {
+    NGX_SENTINEL_M_REQUESTS = 0,    /* requests_total                       */
+
+    /* verdict_total{v=...} — order MUST match ngx_sentinel_verdict_e */
+    NGX_SENTINEL_M_VERDICT_ALLOW,
+    NGX_SENTINEL_M_VERDICT_CHALLENGE,
+    NGX_SENTINEL_M_VERDICT_TARPIT,
+    NGX_SENTINEL_M_VERDICT_BLOCK,
+
+    /* signal_total{s=...} — order MUST match the emit table in
+     * sentinel_metrics.c (mirrors ngx_sentinel_weights_t fields) */
+    NGX_SENTINEL_M_SIG_ERRRATE,
+    NGX_SENTINEL_M_SIG_BLOCKED,
+    NGX_SENTINEL_M_SIG_SCANNER,
+    NGX_SENTINEL_M_SIG_BOT,
+    NGX_SENTINEL_M_SIG_HEADER,
+    NGX_SENTINEL_M_SIG_HONEYPOT,
+    NGX_SENTINEL_M_SIG_VELOCITY,
+    NGX_SENTINEL_M_SIG_ASN,
+    NGX_SENTINEL_M_SIG_COHERENCE,
+    NGX_SENTINEL_M_SIG_CROWDSEC,
+
+    NGX_SENTINEL_M_SHADOW,          /* shadow_total (would-block in shadow)  */
+
+    NGX_SENTINEL_M_MAX
+} ngx_sentinel_metric_e;
+
 /* $sentinel_pow states (PoW challenge action). */
 typedef enum {
     NGX_SENTINEL_POW_OFF       = 0,  /* disabled / no secret / fail-open */
@@ -383,6 +418,8 @@ typedef struct {
     ngx_array_t   fcrdns_zones;  /* ngx_sentinel_zone_t[] (FCrDNS verdict cache) */
     ngx_atomic_t *tarpit_conns; /* per-worker sub-counters [NGX_MAX_PROCESSES]      */
                                 /* allocated in dedicated shm at sentinel_zone init  */
+    ngx_atomic_t *metrics;      /* Prometheus counters [NGX_SENTINEL_M_MAX]          */
+                                /* same shm segment as tarpit_conns (one slab block) */
 } ngx_sentinel_main_conf_t;
 
 typedef struct {
@@ -788,6 +825,27 @@ ngx_int_t sentinel_redis_init_process(ngx_cycle_t *cycle);
  */
 void sentinel_redis_enqueue_ban(ngx_sentinel_loc_conf_t *lcf,
     ngx_str_t *ip, u_char action, time_t expiry);
+
+/* -------------------------------------------------------------------------
+ * Prometheus metrics (sentinel_metrics.c)
+ * ---------------------------------------------------------------------- */
+
+/*
+ * sentinel_metrics_record — bump the aggregate counters for one completed
+ * verdict decision. Called once per request from the preaccess handler after
+ * the verdict is computed, in BOTH shadow and enforce modes. Lock-free atomic
+ * increments; no-op (safe) if metrics shm is absent. `shadow` non-zero records
+ * shadow_total when the verdict would have blocked (tarpit/block band).
+ */
+void sentinel_metrics_record(ngx_sentinel_main_conf_t *mcf,
+    const ngx_sentinel_ctx_t *ctx, ngx_uint_t shadow);
+
+/*
+ * sentinel_metrics_status_handler — content-phase handler for the
+ * `sentinel_status;` location. Emits text/plain Prometheus exposition
+ * (version 0.0.4). Lock-free reads; emits zeros if counters are absent.
+ */
+ngx_int_t sentinel_metrics_status_handler(ngx_http_request_t *r);
 
 /* -------------------------------------------------------------------------
  * Variable index (set by ngx_http_sentinel_module.c, used by sub-files)

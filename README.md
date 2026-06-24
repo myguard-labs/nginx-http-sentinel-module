@@ -551,6 +551,43 @@ http {
 > (`Depends: libhiredis*` on the packaged build). Reference a password via an
 > nginx variable / env-templated config — never hard-code it.
 
+### Prometheus metrics (`sentinel_status`)
+
+`sentinel_status;` installs a content handler that emits aggregate counters in
+the Prometheus text exposition format (`text/plain; version=0.0.4`). It is a
+**pull** endpoint — point your scraper at it; there is no push, no timer, and no
+external dependency. Counters live in the same shared-memory segment as the
+tarpit accounting (allocated once any `sentinel_zone` exists), are bumped
+lock-free in the preaccess phase for **every** evaluated request (shadow and
+enforce alike), and are read without locking. Metrics are best-effort: they
+never block, allocate in, or fail a request.
+
+```nginx
+location = /sentinel-status {
+    sentinel_status;
+    allow 127.0.0.1;          # scraper / Prometheus node
+    allow 10.0.0.0/8;
+    deny  all;                # the endpoint is unauthenticated — restrict it
+}
+```
+
+The location runs no sentinel evaluation itself — it only reports the counters
+the *other* sentinel-enabled locations populate. **Protect it** with
+`allow`/`deny` (or an auth layer): it exposes operational signal.
+
+Exposed metrics:
+
+| Metric | Type | Labels | Meaning |
+|---|---|---|---|
+| `sentinel_requests_total` | counter | — | Requests evaluated by sentinel. |
+| `sentinel_verdict_total` | counter | `v=allow\|challenge\|tarpit\|block` | Verdicts by band. |
+| `sentinel_signal_total` | counter | `s=errrate\|blocked\|scanner\|bot\|header\|honeypot\|velocity\|asn\|coherence\|crowdsec` | Per-signal hit count (one per request the signal fired on). |
+| `sentinel_shadow_total` | counter | — | Would-block decisions (tarpit/block band) suppressed because the location is in shadow mode. |
+| `sentinel_tarpit_active` | gauge | — | Connections currently held in a tarpit (live sum of per-worker counters). |
+
+Example PromQL — block rate over 5 min:
+`rate(sentinel_verdict_total{v="block"}[5m])`.
+
 ### Scoring model
 
 ```

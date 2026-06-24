@@ -71,6 +71,8 @@ static char *ngx_sentinel_set_velocity_zone(ngx_conf_t *cf,
     ngx_command_t *cmd, void *conf);
 static char *ngx_sentinel_set_velocity_bind(ngx_conf_t *cf,
     ngx_command_t *cmd, void *conf);
+static char *ngx_sentinel_set_status(ngx_conf_t *cf,
+    ngx_command_t *cmd, void *conf);
 
 static ngx_int_t ngx_sentinel_init_process(ngx_cycle_t *cycle);
 static ngx_int_t ngx_sentinel_init_tarpit_shm(ngx_conf_t *cf,
@@ -521,6 +523,16 @@ static ngx_command_t ngx_sentinel_commands[] = {
       ngx_conf_set_num_slot,
       NGX_HTTP_LOC_CONF_OFFSET,
       offsetof(ngx_sentinel_loc_conf_t, weights.crowdsec),
+      NULL },
+
+    /* sentinel_status; — install the Prometheus exposition content handler on
+     * this location (operator places it on `location = /sentinel-status` and
+     * protects it with allow/deny). */
+    { ngx_string("sentinel_status"),
+      NGX_HTTP_LOC_CONF | NGX_CONF_NOARGS,
+      ngx_sentinel_set_status,
+      NGX_HTTP_LOC_CONF_OFFSET,
+      0,
       NULL },
 
     ngx_null_command
@@ -1180,6 +1192,11 @@ ngx_sentinel_preaccess_handler(ngx_http_request_t *r)
                   (ngx_uint_t) ctx->inputs.crowdsec_action,
                   (ngx_uint_t) ctx->pow_state);
 
+    /* 3b. Record Prometheus counters (both modes). Lock-free, best-effort. */
+    sentinel_metrics_record(
+        ngx_http_get_module_main_conf(r, ngx_http_sentinel_module),
+        ctx, (ngx_uint_t) lcf->shadow);
+
     /* 4. Shadow mode: compute + log, never enforce → always pass. */
     if (lcf->shadow) {
         return NGX_DECLINED;
@@ -1413,6 +1430,19 @@ ngx_sentinel_log_handler(ngx_http_request_t *r)
 /* -------------------------------------------------------------------------
  * Module init: register phase handler
  * ---------------------------------------------------------------------- */
+
+/* sentinel_status; — install the Prometheus content handler on this location. */
+static char *
+ngx_sentinel_set_status(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
+{
+    ngx_http_core_loc_conf_t  *clcf;
+
+    clcf = ngx_http_conf_get_module_loc_conf(cf, ngx_http_core_module);
+    clcf->handler = sentinel_metrics_status_handler;
+
+    return NGX_CONF_OK;
+}
+
 
 static ngx_int_t
 ngx_sentinel_init_tarpit_shm(ngx_conf_t *cf, ngx_sentinel_main_conf_t *mcf)
@@ -2820,21 +2850,32 @@ ngx_sentinel_tarpit_shm_init(ngx_shm_zone_t *shm_zone, void *data)
     mcf    = shm_zone->data;
     shpool = (ngx_slab_pool_t *) shm_zone->shm.addr;
 
+    /*
+     * One slab block holds BOTH the tarpit per-worker sub-counters and the
+     * Prometheus metrics array, laid out as
+     *   [ tarpit_conns: ngx_atomic_t[NGX_MAX_PROCESSES] ]
+     *   [ metrics:      ngx_atomic_t[NGX_SENTINEL_M_MAX] ]
+     * so the existing piggyback shm carries metrics with no new zone directive.
+     */
     if (shm_zone->shm.exists) {
-        /* Reload / inherited segment: reuse the existing array. */
+        /* Reload / inherited segment: reuse the existing block. */
         mcf->tarpit_conns = shpool->data;
+        mcf->metrics      = (ngx_atomic_t *) shpool->data + NGX_MAX_PROCESSES;
         return NGX_OK;
     }
 
-    conns = ngx_slab_alloc(shpool, sizeof(ngx_atomic_t) * NGX_MAX_PROCESSES);
+    conns = ngx_slab_alloc(shpool,
+        sizeof(ngx_atomic_t) * (NGX_MAX_PROCESSES + NGX_SENTINEL_M_MAX));
     if (conns == NULL) {
         return NGX_ERROR;
     }
 
-    ngx_memzero((void *) conns, sizeof(ngx_atomic_t) * NGX_MAX_PROCESSES);
+    ngx_memzero((void *) conns,
+        sizeof(ngx_atomic_t) * (NGX_MAX_PROCESSES + NGX_SENTINEL_M_MAX));
 
     shpool->data      = (void *) conns;
     mcf->tarpit_conns = conns;
+    mcf->metrics      = conns + NGX_MAX_PROCESSES;
 
     return NGX_OK;
 }

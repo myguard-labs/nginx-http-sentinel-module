@@ -369,6 +369,15 @@ http {{
             sentinel_block_status 444;
         }}
 
+        # Prometheus metrics (TEST 21): the status endpoint itself runs no
+        # sentinel evaluation (no `sentinel on`) - it only scrapes the shm
+        # counters that the other enforce/shadow locations populated. Counters
+        # live in the same shm as tarpit_conns, allocated once the first
+        # sentinel_zone exists (the global `main` zone above).
+        location = /sentinel-status {{
+            sentinel_status;
+        }}
+
         # Block in shadow mode: must NOT enforce -> static file served (200).
         location = /block-shadow {{
             sentinel on;
@@ -1150,6 +1159,76 @@ def test_shield(port: int) -> None:
     print("  TEST 19 shield: PASS (200, shield=1, origin served)")
 
 
+def test_metrics_status(port: int) -> None:
+    """TEST 21 - Prometheus metrics exposition.
+
+    Drives a bot-UA request through /block (enforce, BLOCK band -> 403, bot
+    signal fires) and a clean request through /allow-test (ALLOW), then scrapes
+    GET /sentinel-status and asserts the exposition reports the activity:
+      - Content-Type is the Prometheus text format,
+      - sentinel_requests_total > 0,
+      - sentinel_verdict_total{v="block"} >= 1,
+      - sentinel_signal_total{s="bot"} >= 1.
+    The counters are process-wide shm, so the bot 403 above (plus any earlier
+    block/bot traffic in this nginx instance) guarantees non-zero values.
+    """
+    # 1. A bot UA on /block -> 403 (BLOCK verdict, bot signal).
+    req = urllib.request.Request(
+        f"http://127.0.0.1:{port}/block",
+        headers={"Connection": "close", "User-Agent": BOT_UA})
+    try:
+        with urllib.request.urlopen(req, timeout=20):
+            pass
+    except urllib.error.HTTPError as e:
+        if e.code != 403:
+            raise AssertionError(
+                f"TEST 21 metrics: expected 403 on bot /block; got {e.code}")
+
+    # 2. A clean request on /allow-test -> 200 (ALLOW verdict).
+    req = urllib.request.Request(
+        f"http://127.0.0.1:{port}/allow-test",
+        headers={"Connection": "close"})
+    with urllib.request.urlopen(req, timeout=20):
+        pass
+
+    # 3. Scrape the exposition.
+    req = urllib.request.Request(
+        f"http://127.0.0.1:{port}/sentinel-status",
+        headers={"Connection": "close"})
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        ctype = resp.headers.get("Content-Type", "")
+        text = resp.read().decode("ascii", "replace")
+
+    if "text/plain" not in ctype or "version=0.0.4" not in ctype:
+        raise AssertionError(
+            f"TEST 21 metrics: bad Content-Type {ctype!r}")
+
+    def metric(line_prefix: str) -> int:
+        for line in text.splitlines():
+            if line.startswith(line_prefix):
+                return int(line.rsplit(None, 1)[1])
+        raise AssertionError(
+            f"TEST 21 metrics: line {line_prefix!r} missing from:\n{text}")
+
+    req_total = metric("sentinel_requests_total ")
+    block_v = metric('sentinel_verdict_total{v="block"} ')
+    bot_s = metric('sentinel_signal_total{s="bot"} ')
+
+    if req_total <= 0:
+        raise AssertionError(
+            f"TEST 21 metrics: requests_total must be >0; got {req_total}")
+    if block_v < 1:
+        raise AssertionError(
+            f"TEST 21 metrics: verdict_total{{v=block}} must be >=1; "
+            f"got {block_v}")
+    if bot_s < 1:
+        raise AssertionError(
+            f"TEST 21 metrics: signal_total{{s=bot}} must be >=1; got {bot_s}")
+
+    print(f"  TEST 21 metrics: PASS (requests={req_total}, "
+          f"block={block_v}, bot={bot_s})")
+
+
 def test_pow_challenge(port: int) -> None:
     """TEST 18 - PoW challenge.
 
@@ -1759,6 +1838,9 @@ def main() -> int:
 
             # TEST 14 - maze mode (tarpit drips HTML decoy links, not padding).
             test_tarpit_maze(args.port + 1)
+
+            # TEST 21 - Prometheus metrics exposition (/sentinel-status).
+            test_metrics_status(args.port + 1)
 
             nginx2.stop()
             nginx2.assert_clean_logs()
