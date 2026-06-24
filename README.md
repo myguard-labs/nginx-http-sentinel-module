@@ -191,6 +191,28 @@ passes.
 | `sentinel_tarpit_delay ms;` | `5000` | `100`–`60000` | Delay between drip ticks. |
 | `sentinel_tarpit_bytes N;` | `1024` | `1`–`65536` | Total bytes dripped before the response completes. |
 | `sentinel_tarpit_max_lifetime ms;` | `30000` | `1000`–`600000` | Hard ceiling on how long a tarpitted connection is held; force-closed at the deadline regardless of drip progress. |
+| `sentinel_tarpit_maze on\|off;` | `off` | — | **Maze mode.** Drip HTML decoy crawl-links (`<a href="/…/">`) instead of blank padding, served as `text/html`. A link-following scraper keeps requesting fresh tarpit URLs, sinking more of its time. |
+
+#### Maze mode
+
+With `sentinel_tarpit_maze on;` the tarpit response becomes a never-ending stream
+of unique decoy links instead of meaningless whitespace:
+
+```nginx
+location / {
+    sentinel on;
+    sentinel_mode enforce;
+    sentinel_tarpit_maze on;
+}
+```
+
+Each drip tick emits one `<a href="/<random-hex>/">x</a>` line; every href is
+unique (a cheap per-connection PRNG, no allocation, no shared state) and points
+back into the same tarpitted handler, so a crawler that follows links walks
+deeper into the maze. All the bounding controls above (`max_conns`, `delay`,
+`bytes`, `max_lifetime`) still apply unchanged — maze only changes the *content*
+of the drip, not its resource envelope. Maze and `sentinel_throttle_rate` are
+mutually exclusive in effect: throttle bypasses the drip entirely, so it wins.
 
 #### Throttle (instead of tarpit)
 

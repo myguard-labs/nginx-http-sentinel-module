@@ -126,6 +126,10 @@
 /* Bytes emitted per drip tick (small constant; keeps individual writes tiny). */
 #define NGX_SENTINEL_TARPIT_TICK_BYTES 32
 
+/* Per-tick maze fragment: one decoy <a href> line. Sized to comfortably hold
+ * the longest fragment sentinel_tarpit emits ("<a href=\"/" + 16 hex + "/\">x</a>\n"). */
+#define NGX_SENTINEL_TARPIT_MAZE_FRAG  64
+
 /* -------------------------------------------------------------------------
  * Verdict enum
  * ---------------------------------------------------------------------- */
@@ -300,6 +304,10 @@ typedef struct {
     ngx_int_t                tarpit_delay;        /* ms between drip ticks          */
     ngx_int_t                tarpit_bytes;        /* total bytes to drip (cap)      */
     ngx_int_t                tarpit_max_lifetime; /* hard force-close ceiling (ms)  */
+    /* Maze mode: drip HTML link-soup (decoy crawl links) instead of blank
+     * padding, so a link-following bot keeps crawling into the tarpit
+     * (0 = off, plain padding). */
+    ngx_flag_t               tarpit_maze;
 
     /* BLOCK verdict enforcement: HTTP status to return (444 = close conn). */
     ngx_int_t                block_status;
