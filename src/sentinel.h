@@ -230,6 +230,7 @@ typedef struct {
     ngx_str_t               var_ja4h;
 
     unsigned                computed:1;  /* signals already gathered */
+    unsigned                throttled:1; /* throttle action applied this request */
 } ngx_sentinel_ctx_t;
 
 /* -------------------------------------------------------------------------
@@ -305,6 +306,10 @@ typedef struct {
     /* TTL soft-ban: on BLOCK in enforce mode, persist a self-ban in the
      * errrate zone for this many seconds (0 = off). */
     ngx_int_t                block_ttl;
+    /* Throttle action: on a TARPIT-band verdict in enforce mode, instead of
+     * dripping a trap, let the request proceed but cap egress at this many
+     * bytes/sec via nginx's native r->limit_rate (0 = off, keep tarpit). */
+    size_t                   throttle_rate;
 } ngx_sentinel_loc_conf_t;
 
 /* -------------------------------------------------------------------------

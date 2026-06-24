@@ -82,6 +82,8 @@ static ngx_int_t ngx_sentinel_var_allowlist(ngx_http_request_t *r,
     ngx_http_variable_value_t *v, uintptr_t data);
 static ngx_int_t ngx_sentinel_var_bot(ngx_http_request_t *r,
     ngx_http_variable_value_t *v, uintptr_t data);
+static ngx_int_t ngx_sentinel_var_throttled(ngx_http_request_t *r,
+    ngx_http_variable_value_t *v, uintptr_t data);
 static ngx_int_t ngx_sentinel_var_scanner(ngx_http_request_t *r,
     ngx_http_variable_value_t *v, uintptr_t data);
 static ngx_int_t ngx_sentinel_var_errrate(ngx_http_request_t *r,
@@ -277,6 +279,15 @@ static ngx_command_t ngx_sentinel_commands[] = {
       offsetof(ngx_sentinel_loc_conf_t, block_ttl),
       NULL },
 
+    /* sentinel_throttle_rate size;  default 0 (off, keep tarpit). On a TARPIT
+     * verdict in enforce mode, cap egress at `size` bytes/sec instead. */
+    { ngx_string("sentinel_throttle_rate"),
+      NGX_HTTP_MAIN_CONF | NGX_HTTP_SRV_CONF | NGX_HTTP_LOC_CONF | NGX_CONF_TAKE1,
+      ngx_conf_set_size_slot,
+      NGX_HTTP_LOC_CONF_OFFSET,
+      offsetof(ngx_sentinel_loc_conf_t, throttle_rate),
+      NULL },
+
     /* ---- Phase 3: crowdsec decision-feed directives ---- */
 
     /* sentinel_crowdsec_zone name:size; — main context (declares the shm zone) */
@@ -404,6 +415,9 @@ static ngx_http_variable_t ngx_sentinel_vars[] = {
 
     { ngx_string("sentinel_bot"), NULL,
       ngx_sentinel_var_bot, 0, NGX_HTTP_VAR_NOCACHEABLE, 0 },
+
+    { ngx_string("sentinel_throttled"), NULL,
+      ngx_sentinel_var_throttled, 0, NGX_HTTP_VAR_NOCACHEABLE, 0 },
 
     { ngx_string("sentinel_scanner"), NULL,
       ngx_sentinel_var_scanner, 0, NGX_HTTP_VAR_NOCACHEABLE, 0 },
@@ -671,6 +685,27 @@ ngx_sentinel_var_bot(ngx_http_request_t *r, ngx_http_variable_value_t *v,
 }
 
 static ngx_int_t
+ngx_sentinel_var_throttled(ngx_http_request_t *r, ngx_http_variable_value_t *v,
+    uintptr_t data)
+{
+    ngx_sentinel_ctx_t  *ctx;
+
+    ctx = ngx_sentinel_get_ctx(r);
+    if (ctx == NULL) {
+        v->not_found = 1;
+        return NGX_OK;
+    }
+
+    v->len  = 1;
+    v->data = (u_char *) (ctx->throttled ? "1" : "0");
+    v->valid  = 1;
+    v->not_found   = 0;
+    v->no_cacheable = 1;   /* set during the request, not at gather time */
+
+    return NGX_OK;
+}
+
+static ngx_int_t
 ngx_sentinel_var_scanner(ngx_http_request_t *r, ngx_http_variable_value_t *v,
     uintptr_t data)
 {
@@ -846,6 +881,19 @@ ngx_sentinel_preaccess_handler(ngx_http_request_t *r)
     case NGX_SENTINEL_VERDICT_TARPIT:
         {
             ngx_int_t  trc;
+
+            /* Throttle action: instead of a tarpit trap, let the request run
+             * but cap egress at throttle_rate bytes/sec via nginx's native
+             * rate limiter. No new timers/FDs/conn-cap — bounded by core. */
+            if (lcf->throttle_rate > 0) {
+                r->limit_rate = lcf->throttle_rate;
+                r->limit_rate_after = 0;
+                ctx->throttled = 1;
+                ngx_log_error(NGX_LOG_INFO, r->connection->log, 0,
+                              "sentinel: verdict=tarpit -> throttle %z B/s",
+                              lcf->throttle_rate);
+                return NGX_DECLINED;
+            }
 
             if (lcf->tarpit_max_conns == 0) {
                 /* Tarpit disabled — downgrade to immediate 444. */
@@ -1142,6 +1190,7 @@ ngx_sentinel_create_loc_conf(ngx_conf_t *cf)
     lcf->tarpit_max_lifetime = NGX_CONF_UNSET;
     lcf->block_status        = NGX_CONF_UNSET;
     lcf->block_ttl           = NGX_CONF_UNSET;
+    lcf->throttle_rate       = NGX_CONF_UNSET_SIZE;
 
     return lcf;
 }
@@ -1348,6 +1397,8 @@ ngx_sentinel_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
                            "sentinel_block_ttl must be >= 0 (0 = off)");
         return NGX_CONF_ERROR;
     }
+
+    ngx_conf_merge_size_value(conf->throttle_rate, prev->throttle_rate, 0);
 
     /* inherit zone pointer from parent if not set locally */
     if (conf->zone == NULL) {
