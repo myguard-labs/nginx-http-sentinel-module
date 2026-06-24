@@ -73,10 +73,17 @@ sentinel_score_compute(const ngx_sentinel_inputs_t *inputs,
      * NOT nullify a CrowdSec ban: a deployed CrowdSec feed is the operator
      * explicitly asserting "this IP is malicious regardless of headers."
      * Letting a spoofed UA wipe that is an auth-bypass. So: only short-circuit
-     * when there is no CrowdSec hit. (Once a verified-RDNS flag exists, this
-     * gate can relax to `known_good_ua_verified`.)
+     * when there is no CrowdSec hit.
+     *
+     * FCrDNS tightening: when the forward-confirmed reverse-DNS check has
+     * positively DISPROVED the crawler claim (fcrdns_spoofed), the known_good_ua
+     * short-circuit is suppressed entirely — the request is scored as the bot it
+     * is. A VERIFIED verdict (or FCrDNS disabled / still pending) leaves the
+     * legacy behavior intact (fail-open: a pending verdict does not punish).
      */
-    if (inputs->known_good_ua && !inputs->crowdsec_hit) {
+    if (inputs->known_good_ua && !inputs->crowdsec_hit
+        && !inputs->fcrdns_spoofed)
+    {
         return 0;
     }
 

@@ -50,6 +50,12 @@ static char *ngx_sentinel_set_crowdsec_zone(ngx_conf_t *cf,
     ngx_command_t *cmd, void *conf);
 static char *ngx_sentinel_set_crowdsec_feed(ngx_conf_t *cf,
     ngx_command_t *cmd, void *conf);
+static char *ngx_sentinel_set_fcrdns_zone(ngx_conf_t *cf,
+    ngx_command_t *cmd, void *conf);
+static char *ngx_sentinel_set_fcrdns(ngx_conf_t *cf,
+    ngx_command_t *cmd, void *conf);
+static char *ngx_sentinel_set_fcrdns_suffix(ngx_conf_t *cf,
+    ngx_command_t *cmd, void *conf);
 
 static char *sentinel_conf_honeypot(ngx_conf_t *cf,
     ngx_command_t *cmd, void *conf);
@@ -85,6 +91,8 @@ static ngx_int_t ngx_sentinel_var_velocity(ngx_http_request_t *r,
 static ngx_int_t ngx_sentinel_var_asn(ngx_http_request_t *r,
     ngx_http_variable_value_t *v, uintptr_t data);
 static ngx_int_t ngx_sentinel_var_coherence(ngx_http_request_t *r,
+    ngx_http_variable_value_t *v, uintptr_t data);
+static ngx_int_t ngx_sentinel_var_fcrdns(ngx_http_request_t *r,
     ngx_http_variable_value_t *v, uintptr_t data);
 static ngx_int_t ngx_sentinel_var_allowlist(ngx_http_request_t *r,
     ngx_http_variable_value_t *v, uintptr_t data);
@@ -347,6 +355,38 @@ static ngx_command_t ngx_sentinel_commands[] = {
       0,
       NULL },
 
+    /* sentinel_fcrdns_zone name:size; — main context (declares the verdict cache) */
+    { ngx_string("sentinel_fcrdns_zone"),
+      NGX_HTTP_MAIN_CONF | NGX_CONF_TAKE1,
+      ngx_sentinel_set_fcrdns_zone,
+      NGX_HTTP_MAIN_CONF_OFFSET,
+      0,
+      NULL },
+
+    /* sentinel_fcrdns <zone>; — bind a location to a verdict cache + enable */
+    { ngx_string("sentinel_fcrdns"),
+      NGX_HTTP_MAIN_CONF | NGX_HTTP_SRV_CONF | NGX_HTTP_LOC_CONF | NGX_CONF_TAKE1,
+      ngx_sentinel_set_fcrdns,
+      NGX_HTTP_LOC_CONF_OFFSET,
+      0,
+      NULL },
+
+    /* sentinel_fcrdns_ttl time; — verdict cache TTL (default 3600s) */
+    { ngx_string("sentinel_fcrdns_ttl"),
+      NGX_HTTP_MAIN_CONF | NGX_HTTP_SRV_CONF | NGX_HTTP_LOC_CONF | NGX_CONF_TAKE1,
+      ngx_conf_set_sec_slot,
+      NGX_HTTP_LOC_CONF_OFFSET,
+      offsetof(ngx_sentinel_loc_conf_t, fcrdns_ttl),
+      NULL },
+
+    /* sentinel_fcrdns_verify_suffix <suffix>...; — allowed PTR-name suffixes */
+    { ngx_string("sentinel_fcrdns_verify_suffix"),
+      NGX_HTTP_MAIN_CONF | NGX_HTTP_SRV_CONF | NGX_HTTP_LOC_CONF | NGX_CONF_1MORE,
+      ngx_sentinel_set_fcrdns_suffix,
+      NGX_HTTP_LOC_CONF_OFFSET,
+      0,
+      NULL },
+
     /* sentinel_crowdsec_feed path; — location: feed file (off if unset) */
     { ngx_string("sentinel_crowdsec_feed"),
       NGX_HTTP_MAIN_CONF | NGX_HTTP_SRV_CONF | NGX_HTTP_LOC_CONF | NGX_CONF_TAKE1,
@@ -465,6 +505,9 @@ static ngx_http_variable_t ngx_sentinel_vars[] = {
     { ngx_string("sentinel_coherence"), NULL,
       ngx_sentinel_var_coherence, 0, NGX_HTTP_VAR_NOCACHEABLE, 0 },
 
+    { ngx_string("sentinel_fcrdns"), NULL,
+      ngx_sentinel_var_fcrdns, 0, NGX_HTTP_VAR_NOCACHEABLE, 0 },
+
     { ngx_string("sentinel_allowlist"), NULL,
       ngx_sentinel_var_allowlist, 0, NGX_HTTP_VAR_NOCACHEABLE, 0 },
 
@@ -543,6 +586,7 @@ ngx_sentinel_get_ctx(ngx_http_request_t *r)
     sentinel_velocity_signal(r, lcf, &ctx->inputs);
     sentinel_asn_signal(r, lcf, &ctx->inputs);
     sentinel_coherence_signal(r, &ctx->inputs);
+    sentinel_fcrdns_signal(r, lcf, &ctx->inputs);
     sentinel_crowdsec_signal(r, lcf, &ctx->inputs);
 
     /* Score + verdict (stub returns 0 -> always allow). */
@@ -734,6 +778,36 @@ ngx_sentinel_var_coherence(ngx_http_request_t *r, ngx_http_variable_value_t *v,
 
     v->len  = 1;
     v->data = (u_char *) (ctx->inputs.ua_incoherent ? "1" : "0");
+    v->valid  = 1;
+    v->not_found   = 0;
+    v->no_cacheable = 0;
+
+    return NGX_OK;
+}
+
+static ngx_int_t
+ngx_sentinel_var_fcrdns(ngx_http_request_t *r, ngx_http_variable_value_t *v,
+    uintptr_t data)
+{
+    ngx_sentinel_ctx_t  *ctx;
+    const char          *s;
+
+    ctx = ngx_sentinel_get_ctx(r);
+    if (ctx == NULL) {
+        v->not_found = 1;
+        return NGX_OK;
+    }
+
+    if (ctx->inputs.fcrdns_verified) {
+        s = "verified";
+    } else if (ctx->inputs.fcrdns_spoofed) {
+        s = "spoofed";
+    } else {
+        s = "pending";   /* disabled / no known_good_ua / no cached verdict */
+    }
+
+    v->len  = ngx_strlen(s);
+    v->data = (u_char *) s;
     v->valid  = 1;
     v->not_found   = 0;
     v->no_cacheable = 0;
@@ -941,7 +1015,9 @@ ngx_sentinel_preaccess_handler(ngx_http_request_t *r)
     ngx_log_error(NGX_LOG_INFO, r->connection->log, 0,
                   "sentinel: score=%i verdict=%s ja4h=%s "
                   "shadow=%i errrate=%ui bot=%i scanner=%i header=%i "
-                  "honeypot=%i velocity=%i asn=%i coherence=%i allowlist=%i crowdsec=%i cs_action=%ui",
+                  "honeypot=%i velocity=%i asn=%i coherence=%i "
+                  "fcrdns_verified=%i fcrdns_spoofed=%i "
+                  "allowlist=%i crowdsec=%i cs_action=%ui",
                   ctx->score,
                   verdict_strings[ctx->verdict],
                   ctx->inputs.ja4h,
@@ -954,6 +1030,8 @@ ngx_sentinel_preaccess_handler(ngx_http_request_t *r)
                   (ngx_int_t) ctx->inputs.velocity_exceeded,
                   (ngx_int_t) ctx->inputs.datacenter_asn,
                   (ngx_int_t) ctx->inputs.ua_incoherent,
+                  (ngx_int_t) ctx->inputs.fcrdns_verified,
+                  (ngx_int_t) ctx->inputs.fcrdns_spoofed,
                   (ngx_int_t) ctx->inputs.allowlisted,
                   (ngx_int_t) ctx->inputs.crowdsec_hit,
                   (ngx_uint_t) ctx->inputs.crowdsec_action);
@@ -1247,6 +1325,12 @@ ngx_sentinel_create_main_conf(ngx_conf_t *cf)
         return NULL;
     }
 
+    if (ngx_array_init(&mcf->fcrdns_zones, cf->pool, 2,
+                       sizeof(ngx_sentinel_zone_t)) != NGX_OK)
+    {
+        return NULL;
+    }
+
     return mcf;
 }
 
@@ -1298,6 +1382,10 @@ ngx_sentinel_create_loc_conf(ngx_conf_t *cf)
     lcf->block_ttl           = NGX_CONF_UNSET;
     lcf->throttle_rate       = NGX_CONF_UNSET_SIZE;
 
+    lcf->fcrdns_zone = NGX_CONF_UNSET_PTR;
+    lcf->fcrdns_ttl  = NGX_CONF_UNSET;
+    /* fcrdns_zone_name empty + fcrdns_suffixes empty via pcalloc. */
+
     return lcf;
 }
 
@@ -1348,6 +1436,45 @@ ngx_sentinel_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
     ngx_conf_merge_value(conf->weights.coherence,
                          prev->weights.coherence,
                          NGX_SENTINEL_DEFAULT_W_COHERENCE);
+
+    /* FCrDNS verify (enabled by binding a zone) + verdict-cache TTL. */
+    ngx_conf_merge_value(conf->fcrdns_ttl, prev->fcrdns_ttl,
+                         NGX_SENTINEL_FCRDNS_DEFAULT_TTL);
+    ngx_conf_merge_ptr_value(conf->fcrdns_zone, prev->fcrdns_zone, NULL);
+    if (conf->fcrdns_suffixes.nelts == 0 && prev->fcrdns_suffixes.nelts > 0) {
+        conf->fcrdns_suffixes = prev->fcrdns_suffixes;
+    }
+
+    /* inherit fcrdns binding name; resolve name -> zone (same merit rule as
+     * the velocity zone — an unknown name must error, not inherit silently). */
+    if (conf->fcrdns_zone_name.len == 0 && prev->fcrdns_zone_name.len > 0) {
+        conf->fcrdns_zone_name = prev->fcrdns_zone_name;
+    }
+    if (conf->fcrdns_zone_name.len > 0) {
+        ngx_sentinel_main_conf_t  *mcf;
+        ngx_sentinel_zone_t       *zones;
+        ngx_uint_t                 i;
+
+        conf->fcrdns_zone = NULL;
+        mcf = ngx_http_conf_get_module_main_conf(cf, ngx_http_sentinel_module);
+        zones = mcf->fcrdns_zones.elts;
+        for (i = 0; i < mcf->fcrdns_zones.nelts; i++) {
+            if (zones[i].name.len == conf->fcrdns_zone_name.len
+                && ngx_strncmp(zones[i].name.data, conf->fcrdns_zone_name.data,
+                               conf->fcrdns_zone_name.len) == 0)
+            {
+                conf->fcrdns_zone = &zones[i];
+                break;
+            }
+        }
+        if (conf->fcrdns_zone == NULL || conf->fcrdns_zone == NGX_CONF_UNSET_PTR) {
+            ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                               "sentinel_fcrdns_zone: unknown zone \"%V\"",
+                               &conf->fcrdns_zone_name);
+            return NGX_CONF_ERROR;
+        }
+    }
+
     ngx_conf_merge_ptr_value(conf->vel_zone, prev->vel_zone, NULL);
 
     /* inherit velocity binding name from parent location */
@@ -1829,6 +1956,122 @@ ngx_sentinel_set_crowdsec_zone(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
     shm->data = zone;
 
     zone->shm_zone = shm;
+
+    return NGX_CONF_OK;
+}
+
+static char *
+ngx_sentinel_set_fcrdns_zone(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
+{
+    ngx_sentinel_main_conf_t  *mcf = conf;
+    ngx_sentinel_zone_t       *zone;
+    ngx_str_t                 *value;
+    ngx_str_t                  name;
+    ssize_t                    size;
+    u_char                    *colon;
+    ngx_shm_zone_t            *shm;
+
+    value = cf->args->elts;
+
+    colon = ngx_strlchr(value[1].data,
+                        value[1].data + value[1].len, ':');
+    if (colon == NULL) {
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                           "invalid sentinel_fcrdns_zone \"%V\": "
+                           "expected name:size", &value[1]);
+        return NGX_CONF_ERROR;
+    }
+
+    name.data = value[1].data;
+    name.len  = (size_t) (colon - value[1].data);
+
+    {
+        ngx_str_t  sz_str;
+        sz_str.data = colon + 1;
+        sz_str.len  = value[1].len - name.len - 1;
+        size = ngx_parse_size(&sz_str);
+    }
+
+    if (size == NGX_ERROR || size < (ssize_t) ngx_pagesize) {
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                           "invalid sentinel_fcrdns_zone size in \"%V\"",
+                           &value[1]);
+        return NGX_CONF_ERROR;
+    }
+
+    zone = ngx_array_push(&mcf->fcrdns_zones);
+    if (zone == NULL) {
+        return NGX_CONF_ERROR;
+    }
+
+    ngx_memzero(zone, sizeof(ngx_sentinel_zone_t));
+
+    zone->name.data = ngx_pnalloc(cf->pool, name.len);
+    if (zone->name.data == NULL) {
+        return NGX_CONF_ERROR;
+    }
+    ngx_memcpy(zone->name.data, name.data, name.len);
+    zone->name.len  = name.len;
+
+    /* verdict-cache nodes carry no event ring (threshold==0). interval drives
+     * the LRU age-out backstop for abandoned entries. */
+    zone->interval  = NGX_SENTINEL_FCRDNS_DEFAULT_TTL;
+    zone->block     = 0;
+    zone->threshold = 0;
+
+    shm = ngx_shared_memory_add(cf, &zone->name, (size_t) size,
+                                 &ngx_http_sentinel_module);
+    if (shm == NULL) {
+        return NGX_CONF_ERROR;
+    }
+
+    shm->init = sentinel_shm_init_zone;
+    shm->data = zone;
+
+    zone->shm_zone = shm;
+
+    return NGX_CONF_OK;
+}
+
+/* sentinel_fcrdns <zone>;  — bind a location to an FCrDNS verdict-cache zone
+ * (also enables the signal). The zone name is resolved to a pointer at merge. */
+static char *
+ngx_sentinel_set_fcrdns(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
+{
+    ngx_sentinel_loc_conf_t  *lcf = conf;
+    ngx_str_t                *value = cf->args->elts;
+
+    if (lcf->fcrdns_zone_name.len != 0) {
+        return "is duplicate";
+    }
+    lcf->fcrdns_zone_name = value[1];
+    return NGX_CONF_OK;
+}
+
+/* sentinel_fcrdns_verify_suffix <suffix>...;  — restrict accepted PTR names. */
+static char *
+ngx_sentinel_set_fcrdns_suffix(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
+{
+    ngx_sentinel_loc_conf_t  *lcf = conf;
+    ngx_str_t                *value = cf->args->elts;
+    ngx_str_t                *suf;
+    ngx_uint_t                i;
+
+    if (lcf->fcrdns_suffixes.elts == NULL) {
+        if (ngx_array_init(&lcf->fcrdns_suffixes, cf->pool, 4,
+                           sizeof(ngx_str_t)) != NGX_OK)
+        {
+            return NGX_CONF_ERROR;
+        }
+    }
+
+    for (i = 1; i < cf->args->nelts; i++) {
+        suf = ngx_array_push(&lcf->fcrdns_suffixes);
+        if (suf == NULL) {
+            return NGX_CONF_ERROR;
+        }
+        *suf = value[i];
+    }
 
     return NGX_CONF_OK;
 }

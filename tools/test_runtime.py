@@ -112,6 +112,7 @@ http {{
 
     sentinel_zone main:1m;
     sentinel_velocity_zone vzone:1m rate=3 window=60;
+    sentinel_fcrdns_zone fcz:1m;
 
     # TEST 15 (ASN signal): synthesize a geoip2-style ASN variable from a test
     # header so the suite exercises sentinel_asn's complex-value read + list
@@ -412,6 +413,21 @@ http {{
             sentinel_weight_velocity 0;
             access_log {root}/logs/coherence.log sentinelvars;
             return 200 "coherence";
+        }}
+
+        # TEST 17 (FCrDNS): zone bound, no resolver configured. A self-declared
+        # crawler (Googlebot UA -> known_good_ua) must fail open: the verdict is
+        # PENDING ($sentinel_fcrdns=pending), the async resolve is skipped (no
+        # resolver), the request is served, and known_good_ua still short-
+        # circuits the score to 0 (legacy fail-open). This exercises the signal
+        # config-load + request path WITHOUT any live DNS dependency.
+        location = /fcrdns {{
+            sentinel on;
+            sentinel_mode shadow;
+            sentinel_fcrdns fcz;
+            add_header X-Fcrdns $sentinel_fcrdns always;
+            access_log {root}/logs/fcrdns.log sentinelvars;
+            return 200 "fcrdns";
         }}
 
 {cs_block}    }}
@@ -1445,6 +1461,40 @@ def main() -> int:
                     f"got hit={coh_hit} miss={coh_miss}")
             print(f"  TEST 16 coherence: PASS "
                   f"(hit={coh_hit}, miss={coh_miss}, none={coh_none})")
+
+            # TEST 17: FCrDNS fail-open. Zone bound but no resolver configured.
+            # A Googlebot UA (known_good_ua) must yield $sentinel_fcrdns=pending
+            # and a short-circuited score of 0 (no resolver -> async skipped ->
+            # legacy known_good_ua behavior), serving 200 without any DNS.
+            fc_status, fc_headers, _ = fetch(
+                args.port, "/fcrdns",
+                extra_headers={"User-Agent":
+                    "Mozilla/5.0 (compatible; Googlebot/2.1; "
+                    "+http://www.google.com/bot.html)"})
+            if fc_status != 200:
+                raise AssertionError(
+                    f"TEST 17 fcrdns: expected 200, got {fc_status}")
+            fc_verdict = fc_headers.get("x-fcrdns", "")
+            if fc_verdict != "pending":
+                raise AssertionError(
+                    f"TEST 17 fcrdns: expected verdict 'pending' (no resolver), "
+                    f"got '{fc_verdict}'")
+            time.sleep(0.2)
+            fc_log = root / "server" / "logs" / "fcrdns.log"
+            if not fc_log.exists():
+                raise AssertionError("fcrdns.log not written")
+            fclines = [ln.split() for ln in
+                       fc_log.read_text(encoding="utf-8").splitlines()
+                       if ln.strip()]
+            if not fclines:
+                raise AssertionError("fcrdns.log empty")
+            fc_score = int(fclines[-1][1])
+            if fc_score != 0:
+                raise AssertionError(
+                    f"TEST 17 fcrdns: known_good_ua must short-circuit to 0 "
+                    f"while pending; got score={fc_score}")
+            print(f"  TEST 17 fcrdns: PASS "
+                  f"(verdict=pending, score=0, fail-open no-resolver)")
 
             # TEST 13: per-route policy — same bot UA, opposite verdicts in two
             # sibling locations (strict blocks, lax allows).

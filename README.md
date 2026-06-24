@@ -254,6 +254,59 @@ clients, which make no browser claim and are scored by the bot-UA signal).
 > **Fail-open:** no User-Agent, a non-browser UA, or a fully browser-shaped
 > request all contribute `0`.
 
+### FCrDNS verify — forward-confirmed reverse DNS (location context)
+
+A `User-Agent: Googlebot` header is trivially spoofable, yet the bot-UA signal
+sets `known_good_ua` on the substring alone and the score lets that short-circuit
+the in-module heuristics — an auth-bypass risk for anyone impersonating a search
+engine. FCrDNS closes it. When enabled, a request whose UA matches a known crawler
+triggers an **asynchronous** PTR lookup of the client IP, then a forward (A/AAAA)
+lookup of the resolved name, and only trusts the crawler claim if the forward
+result contains the original client IP (optionally with a configured PTR-name
+suffix such as `.googlebot.com`).
+
+The verdict (`verified` / `spoofed`) is cached per-IP in a dedicated shm zone for
+`sentinel_fcrdns_ttl` seconds. **The DNS work never blocks the request path:** the
+first request from an IP fails open (verdict `pending` → `known_good_ua` keeps its
+legacy behavior for that one request) and kicks the async resolve; the cached
+verdict governs every subsequent request. A `spoofed` verdict **suppresses** the
+`known_good_ua` short-circuit, so the impersonator is scored as the bot it is; a
+`verified` verdict (or a still-`pending`/disabled signal) leaves the legacy
+short-circuit intact.
+
+**Zone declaration (http context)** + binding (enables the signal):
+```nginx
+http {
+    resolver 1.1.1.1 8.8.8.8 valid=300s;   # required for the async lookups
+    sentinel_fcrdns_zone fcdns:1m;          # verdict cache
+
+    server {
+        location / {
+            sentinel on;
+            sentinel_fcrdns fcdns;                              # bind + enable
+            sentinel_fcrdns_ttl 1h;                             # verdict cache TTL
+            sentinel_fcrdns_verify_suffix .googlebot.com .google.com
+                                          .search.msn.com;      # optional PTR gate
+        }
+    }
+}
+```
+
+| Directive | Default | Meaning |
+|---|---|---|
+| `sentinel_fcrdns_zone name:size;` | — | Declares the verdict-cache shm zone (http context). |
+| `sentinel_fcrdns <zone>;` | off | Bind a location to a verdict zone and enable FCrDNS there. |
+| `sentinel_fcrdns_ttl time;` | `1h` | How long a `verified`/`spoofed` verdict is cached before re-resolution. |
+| `sentinel_fcrdns_verify_suffix <s>...;` | — | Restrict accepted PTR names to these suffixes (empty = accept any forward-confirmed name). |
+
+**Variable:** `$sentinel_fcrdns` — `verified` / `spoofed` / `pending` (the last
+also covers disabled, no-`known_good_ua`, and no-resolver cases).
+
+> **Fail-open:** no resolver configured, no bound zone, lookup error/timeout, or
+> NXDOMAIN all leave the verdict `pending` and never block the request. Only a
+> positive disproof (wrong suffix, or a forward result that does not contain the
+> client IP) caches `spoofed`.
+
 ### Tarpit (location context)
 
 When the verdict is `tarpit`, the connection is held by a bounded "drip" writer
@@ -411,6 +464,7 @@ values computed in the `PREACCESS` phase.
 | `$sentinel_velocity` | `0`/`1` | Per-identity request rate exceeded |
 | `$sentinel_asn` | `0`/`1` | Client ASN in the flagged datacenter/abuse list |
 | `$sentinel_coherence` | `0`/`1` | UA claims a browser the request shape contradicts |
+| `$sentinel_fcrdns` | token | `verified` / `spoofed` / `pending` (forward-confirmed reverse-DNS verdict) |
 | `$sentinel_allowlist` | `0`/`1` | Client IP in a trusted CIDR |
 | `$sentinel_crowdsec` | `0`/`1` | IP present in the CrowdSec ban table |
 | `$sentinel_crowdsec_action` | token | `none` / `ban` / `captcha` / `throttle` |
@@ -427,6 +481,7 @@ log_format sentinel_decision escape=json
     '"header_anomaly":$sentinel_header_anomaly,"honeypot":$sentinel_honeypot,'
     '"velocity":$sentinel_velocity,"asn":$sentinel_asn,'
     '"coherence":$sentinel_coherence,'
+    '"fcrdns":"$sentinel_fcrdns",'
     '"allowlist":$sentinel_allowlist,'
     '"crowdsec":$sentinel_crowdsec,"crowdsec_action":"$sentinel_crowdsec_action",'
     '"throttled":$sentinel_throttled}';
