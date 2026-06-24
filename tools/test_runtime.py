@@ -315,6 +315,22 @@ http {{
             sentinel_threshold challenge=0 tarpit=0 block=1;
         }}
 
+        # TTL soft-ban (TEST 11, exercised on the Phase-2 instance whose shm is
+        # not polluted by TEST 5's 404 flood). First BLOCK persists a 2s self-ban
+        # in the errrate zone; a subsequent CLEAN-UA request still blocks (errrate
+        # blocked -> w_blocked re-crosses block=1) until the ttl expires.
+        location = /block-ttl {{
+            sentinel on;
+            sentinel_mode enforce;
+            # Bands ascending so a CLEAN (score 0) request is ALLOWED, while a
+            # bot UA (weight 100) and a persisted soft-ban (w_blocked 100) both
+            # land in the block band. Avoids the tarpit=0 trap where score 0
+            # would tarpit and hang the post-expiry allow assertion.
+            sentinel_threshold challenge=90 tarpit=95 block=99;
+            sentinel_weight_bot 100;
+            sentinel_block_ttl 2;
+        }}
+
 {cs_block}    }}
 }}
 """
@@ -356,7 +372,7 @@ class Nginx:
         # Static targets for the tarpit/shadow/cs locations (served in the
         # CONTENT phase so PREACCESS — and the sentinel handler — runs).
         for name in ("tarpit", "tarpit-life", "tarpit-shadow", "cs",
-                     "block", "block-close", "block-shadow"):
+                     "block", "block-close", "block-shadow", "block-ttl"):
             (html / name).write_text("ok\n", encoding="ascii")
         (self.root / "conf" / "nginx.conf").write_text(
             nginx_config(self.root, self.port, self.module, workers,
@@ -592,6 +608,7 @@ def test_tarpit_bounds_parse(nginx: "Nginx") -> None:
          "lifetime above 600000 upper bound"),
         ("sentinel_block_status 200", "block_status 200 below 400 lower bound"),
         ("sentinel_block_status 600", "block_status 600 above 599 upper bound"),
+        ("sentinel_block_ttl -1", "block_ttl negative rejected"),
     ]
 
     load = f"load_module {nginx.module};\n" if nginx.module else ""
@@ -857,6 +874,35 @@ def test_tarpit_cap_flood(port: int, root: pathlib.Path,
         )
     print(f"  T2.1 cap-flood: PASS (cap={cap} flood={flood} "
           f"tarpitted={tarpitted} closed={closed})")
+
+
+def test_softban_ttl(port: int) -> None:
+    """TEST 11 - TTL soft-ban: a BLOCK persists a self-ban; a subsequent CLEAN
+    request still blocks until the ttl expires (block_ttl=2s on /block-ttl).
+
+    Runs on the Phase-2 instance whose errrate shm is NOT polluted by TEST 5's
+    404 flood, so the clean baseline starts at errrate=0.
+    """
+    # 1. Bot UA forces VERDICT_BLOCK -> 403 AND persists a 2s self-ban.
+    expect_status(port, "/block-ttl", 403,
+                  extra_headers={"User-Agent": BOT_UA})
+    # 2. Clean UA, same identity (127.0.0.1), within ttl: the persisted self-ban
+    #    short-circuits (errrate_blocked -> w_blocked re-crosses block=1) -> 403.
+    status, _, _ = fetch(port, "/block-ttl",
+                         extra_headers={"User-Agent": "curl/8.0"})
+    if status != 403:
+        raise AssertionError(
+            f"TEST 11 softban: clean UA within ttl must still block (403); "
+            f"got {status}")
+    # 3. After the ttl expires, the same clean UA is allowed again -> 200.
+    time.sleep(3.0)
+    status, _, _ = fetch(port, "/block-ttl",
+                         extra_headers={"User-Agent": "curl/8.0"})
+    if status != 200:
+        raise AssertionError(
+            f"TEST 11 softban: clean UA after ttl expiry must pass (200); "
+            f"got {status}")
+    print("  TEST 11 softban-ttl: PASS (block=403, within-ttl=403, expired=200)")
 
 
 def test_tarpit_no_malloc_grep(src_dir: pathlib.Path) -> None:
@@ -1177,6 +1223,9 @@ def main() -> int:
             # T2.1 - conn-cap enforced under flood (cap=4, flood=20).
             test_tarpit_cap_flood(args.port + 1, root2 / "server",
                                   cap=4, flood=20)
+
+            # TEST 11 - TTL soft-ban (clean shm: not polluted by TEST 5).
+            test_softban_ttl(args.port + 1)
 
             nginx2.stop()
             nginx2.assert_clean_logs()

@@ -203,6 +203,21 @@ and the request passes.
 | Directive | Default | Bounds | Description |
 |---|---|---|---|
 | `sentinel_block_status N;` | `403` | `400`–`599`, or `444` | HTTP status returned for a `block` verdict. `444` closes the connection with no response. |
+| `sentinel_block_ttl S;` | `0` (off) | `>= 0` | On a `block` verdict in `enforce` mode, persist a self-ban for `S` seconds in the errrate `sentinel_zone`. |
+
+#### TTL soft-ban
+
+With `sentinel_block_ttl S;` (S > 0), a `block` verdict in `enforce` mode also
+writes `blocked_until = now + S` for the client identity (`SHA-256($binary_remote_addr)`)
+into the errrate zone. Every subsequent request from that identity is then
+short-circuited by the errrate lookup (it returns *blocked* → `sentinel_weight_blocked`,
+default `100`, folds into the score → the score re-crosses the block band) for the
+whole TTL — **with no re-evaluation of the original signals**. After the TTL
+expires the entry ages out and the identity is evaluated normally again.
+
+Requires a `sentinel_zone` bound to the location (the errrate zone); if none is
+configured the soft-ban is skipped (fail-open) and only the immediate block fires.
+Shadow mode never persists a soft-ban.
 
 ### CrowdSec feed (out-of-band)
 
