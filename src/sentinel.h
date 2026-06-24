@@ -61,6 +61,7 @@
 #define NGX_SENTINEL_DEFAULT_W_HONEYPOT 90   /* decoy-URL (honeypot) hit        */
 #define NGX_SENTINEL_DEFAULT_W_VELOCITY 30   /* request-rate abuse: meaningful but below scanner/honeypot */
 #define NGX_SENTINEL_DEFAULT_W_ASN     35    /* request from a flagged datacenter/abuse ASN */
+#define NGX_SENTINEL_DEFAULT_W_COHERENCE 40  /* UA claims a browser but request shape disagrees */
 #define NGX_SENTINEL_VELOCITY_DEFAULT_THRESHOLD 100  /* requests per window */
 #define NGX_SENTINEL_VELOCITY_DEFAULT_WINDOW    10   /* seconds */
 
@@ -214,6 +215,11 @@ typedef struct {
      * the operator's flagged datacenter/abuse-ASN list */
     ngx_flag_t  datacenter_asn;
 
+    /* Coherence: UA claims a mainstream browser family but the request lacks
+     * the header shape every real instance of that family sends (no Accept /
+     * Accept-Language / gzip Accept-Encoding, or pre-HTTP/1.1) */
+    ngx_flag_t  ua_incoherent;
+
     /* Allowlist: client IP matched an operator-trusted CIDR (forces score 0,
      * unless a CrowdSec ban is present — see sentinel_score.c) */
     ngx_flag_t  allowlisted;
@@ -265,6 +271,7 @@ typedef struct {
     ngx_int_t  honeypot;  /* added once if honeypot        */
     ngx_int_t  velocity;  /* added once if velocity_exceeded */
     ngx_int_t  asn;       /* added once if datacenter_asn      */
+    ngx_int_t  coherence; /* added once if ua_incoherent       */
     ngx_int_t  crowdsec;  /* base weight for a crowdsec ban hit (tiered) */
 } ngx_sentinel_weights_t;
 
@@ -464,6 +471,22 @@ void sentinel_velocity_signal(ngx_http_request_t *r,
  */
 void sentinel_asn_signal(ngx_http_request_t *r,
     ngx_sentinel_loc_conf_t *lcf, ngx_sentinel_inputs_t *inputs);
+
+/* -------------------------------------------------------------------------
+ * Coherence API (sentinel_coherence.c)
+ * ---------------------------------------------------------------------- */
+
+/*
+ * sentinel_coherence_signal — set inputs->ua_incoherent = 1 if the User-Agent
+ * claims a mainstream browser family (Chrome/Firefox/Safari/Edge/Gecko) but the
+ * request is missing the header shape every real browser sends (no Accept /
+ * Accept-Language / gzip-or-br Accept-Encoding, or pre-HTTP/1.1). Pure
+ * structural heuristic over r->headers_in: no DB, no JA4H hash, no regex, no
+ * malloc, no network. Fail-open: NULL r / no UA / non-browser UA / fully
+ * browser-shaped request → ua_incoherent = 0.
+ */
+void sentinel_coherence_signal(ngx_http_request_t *r,
+    ngx_sentinel_inputs_t *inputs);
 
 /* -------------------------------------------------------------------------
  * Score API (sentinel_score.c)

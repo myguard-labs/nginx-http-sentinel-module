@@ -52,6 +52,7 @@ non-negative integer.
 | `sentinel_weight_honeypot N;` | `90` | Added once when the request URI matches a configured decoy-path prefix (see `sentinel_honeypot`). |
 | `sentinel_weight_velocity N;` | `30` | Added once when the request rate for this identity exceeds the configured threshold in the velocity zone. |
 | `sentinel_weight_asn N;` | `35` | Added once when the client's ASN (read from an operator-supplied geoip2 variable) matches the flagged datacenter/abuse-ASN list (see `sentinel_asn`). |
+| `sentinel_weight_coherence N;` | `40` | Added once when the User-Agent claims a mainstream browser but the request lacks a real browser's header shape (see *UA↔request-shape coherence* below). |
 
 ### Velocity signal (`sentinel_velocity_zone` + `sentinel_velocity`)
 
@@ -222,6 +223,37 @@ http {
 > unset, or the IP is not in the DB (empty value), the signal contributes `0` —
 > it never blocks on a missing lookup.
 
+### UA↔request-shape coherence
+
+Every mainstream interactive browser (Chrome, Firefox, Safari, Edge) emits a
+characteristic request shape: an `Accept` header, an `Accept-Language` header, an
+`Accept-Encoding` advertising `gzip` (and usually `br`), and HTTP/1.1 or HTTP/2.
+A scraper that forges a browser `User-Agent` but speaks a bare HTTP client (no
+`Accept*`, HTTP/1.0, no compression) is **incoherent** — it claims to be a
+browser it demonstrably is not.
+
+This signal flags exactly that mismatch: the UA claims a mainstream browser
+family **and** the request is missing that family's header fingerprint entirely
+(no `Accept`, **or** no `Accept-Language`, **or** no `gzip`/`br`
+`Accept-Encoding`, **or** a pre-HTTP/1.1 protocol). It is deliberately
+conservative — any one fingerprint present clears it — to keep the
+false-positive rate near zero. A match sets `$sentinel_coherence` to `1` and
+adds `sentinel_weight_coherence` (default `40`) once.
+
+There is **no fingerprint database and no JA4H hash comparison** — a SHA-256
+hash cannot be mapped to a browser family without a brittle per-version table.
+This is a pure structural heuristic over the request headers: no DB, no regex,
+no malloc, no network. It needs no configuration; it activates wherever
+`sentinel on;` is set. Tune or disable it with `sentinel_weight_coherence`
+(set `0` to turn it off).
+
+**Variable:** `$sentinel_coherence` — `1` if the UA claimed a browser the
+request shape contradicts, `0` otherwise (including for honest non-browser
+clients, which make no browser claim and are scored by the bot-UA signal).
+
+> **Fail-open:** no User-Agent, a non-browser UA, or a fully browser-shaped
+> request all contribute `0`.
+
 ### Tarpit (location context)
 
 When the verdict is `tarpit`, the connection is held by a bounded "drip" writer
@@ -378,6 +410,7 @@ values computed in the `PREACCESS` phase.
 | `$sentinel_honeypot` | `0`/`1` | URI matched a decoy-path prefix |
 | `$sentinel_velocity` | `0`/`1` | Per-identity request rate exceeded |
 | `$sentinel_asn` | `0`/`1` | Client ASN in the flagged datacenter/abuse list |
+| `$sentinel_coherence` | `0`/`1` | UA claims a browser the request shape contradicts |
 | `$sentinel_allowlist` | `0`/`1` | Client IP in a trusted CIDR |
 | `$sentinel_crowdsec` | `0`/`1` | IP present in the CrowdSec ban table |
 | `$sentinel_crowdsec_action` | token | `none` / `ban` / `captcha` / `throttle` |
@@ -393,6 +426,7 @@ log_format sentinel_decision escape=json
     '"scanner":$sentinel_scanner,"bot":$sentinel_bot,'
     '"header_anomaly":$sentinel_header_anomaly,"honeypot":$sentinel_honeypot,'
     '"velocity":$sentinel_velocity,"asn":$sentinel_asn,'
+    '"coherence":$sentinel_coherence,'
     '"allowlist":$sentinel_allowlist,'
     '"crowdsec":$sentinel_crowdsec,"crowdsec_action":"$sentinel_crowdsec_action",'
     '"throttled":$sentinel_throttled}';
