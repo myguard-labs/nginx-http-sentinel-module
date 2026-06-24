@@ -249,6 +249,52 @@ prevent integer overflow from pathological weight × count products.
 | 30 – 59 | challenge (PoW / js-challenge) |
 | 0 – 29 | allow |
 
+### Variables & structured decision log
+
+Every per-request decision input is exposed as an nginx variable, so you can emit
+a complete, machine-parseable decision record with a stock `log_format` — no
+custom log directive needed. All variables are `NOCACHEABLE` and resolve to the
+values computed in the `PREACCESS` phase.
+
+| Variable | Type | Meaning |
+|---|---|---|
+| `$sentinel_score` | int | Final weighted score |
+| `$sentinel_verdict` | token | `allow` / `challenge` / `tarpit` / `block` |
+| `$sentinel_ja4h` | hex | JA4H request fingerprint (24 hex chars) |
+| `$sentinel_errrate` | int | Error-burst count from the sliding window |
+| `$sentinel_scanner` | `0`/`1` | URI matched a known scanner-path prefix |
+| `$sentinel_bot` | `0`/`1` | Heuristic bot User-Agent |
+| `$sentinel_header_anomaly` | `0`/`1` | Suspicious/malformed request headers |
+| `$sentinel_honeypot` | `0`/`1` | URI matched a decoy-path prefix |
+| `$sentinel_velocity` | `0`/`1` | Per-identity request rate exceeded |
+| `$sentinel_allowlist` | `0`/`1` | Client IP in a trusted CIDR |
+| `$sentinel_crowdsec` | `0`/`1` | IP present in the CrowdSec ban table |
+| `$sentinel_crowdsec_action` | token | `none` / `ban` / `captcha` / `throttle` |
+
+**Example — JSON decision log:**
+
+```nginx
+log_format sentinel_decision escape=json
+    '{"ts":"$time_iso8601","ip":"$remote_addr","uri":"$request_uri",'
+    '"score":$sentinel_score,"verdict":"$sentinel_verdict",'
+    '"ja4h":"$sentinel_ja4h","errrate":$sentinel_errrate,'
+    '"scanner":$sentinel_scanner,"bot":$sentinel_bot,'
+    '"header_anomaly":$sentinel_header_anomaly,"honeypot":$sentinel_honeypot,'
+    '"velocity":$sentinel_velocity,"allowlist":$sentinel_allowlist,'
+    '"crowdsec":$sentinel_crowdsec,"crowdsec_action":"$sentinel_crowdsec_action"}';
+
+server {
+    sentinel on;
+    sentinel_mode shadow;                       # observe first
+    access_log /var/log/nginx/sentinel.jsonl sentinel_decision;
+}
+```
+
+In `shadow` mode this gives you a full per-request decision feed to tune weights
+and thresholds before switching to `enforce`. The same line is also emitted to
+`error_log` at `info` level on every request (both modes) as a `key=value`
+string for quick eyeballing.
+
 ---
 
 ## Why one module
