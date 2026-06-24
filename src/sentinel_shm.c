@@ -518,3 +518,56 @@ sentinel_shm_errrate_record(ngx_sentinel_zone_t *zone, ngx_str_t *key,
     ngx_shmtx_unlock(&zone->shpool->mutex);
     return (n->blocked_until > now) ? NGX_BUSY : NGX_OK;
 }
+
+/*
+ * sentinel_shm_softban_set — persist a self-ban for `key` in the errrate zone.
+ *
+ * On a BLOCK verdict (enforce mode) with sentinel_block_ttl > 0, the preaccess
+ * handler calls this to write blocked_until = now + ttl.  A subsequent request
+ * from the same identity is short-circuited by errrate_lookup (returns NGX_BUSY
+ * while blocked_until > now), so the block self-persists for the TTL with NO
+ * re-evaluation of the original signals.
+ *
+ * Reuses the same lock + node-alloc + eviction path as errrate_record (the
+ * node carries an event ring it never uses for soft-bans — harmless, keeps the
+ * slab sizing identical to the errrate node so a key may be either at any time).
+ * Returns NGX_OK on success, NGX_ERROR on zone-full / bad zone (caller logs +
+ * fails open).
+ */
+ngx_int_t
+sentinel_shm_softban_set(ngx_sentinel_zone_t *zone, ngx_str_t *key,
+    time_t now, time_t ttl)
+{
+    uint32_t              hash;
+    ngx_sentinel_node_t  *n;
+
+    if (zone == NULL || zone->sh == NULL || zone->shpool == NULL || ttl <= 0) {
+        return NGX_ERROR;
+    }
+
+    hash = ngx_crc32_short(key->data, key->len);
+
+    ngx_shmtx_lock(&zone->shpool->mutex);
+
+    sentinel_shm_expire(zone, now, NGX_SENTINEL_EXPIRE_BATCH);
+
+    n = sentinel_shm_lookup(zone, hash, key);
+    if (n == NULL) {
+        n = sentinel_shm_create_node(zone, hash, key, now);
+        if (n == NULL) {
+            ngx_shmtx_unlock(&zone->shpool->mutex);
+            return NGX_ERROR;   /* zone full */
+        }
+    } else {
+        sentinel_shm_touch(zone, n);
+    }
+
+    n->last_seen      = now;
+    n->blocked_until  = now + ttl;
+    /* Drop any in-flight burst window — the ban supersedes it. */
+    n->event_head     = 0;
+    n->event_count    = 0;
+
+    ngx_shmtx_unlock(&zone->shpool->mutex);
+    return NGX_OK;
+}

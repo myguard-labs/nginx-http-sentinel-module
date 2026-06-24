@@ -302,6 +302,9 @@ typedef struct {
 
     /* BLOCK verdict enforcement: HTTP status to return (444 = close conn). */
     ngx_int_t                block_status;
+    /* TTL soft-ban: on BLOCK in enforce mode, persist a self-ban in the
+     * errrate zone for this many seconds (0 = off). */
+    ngx_int_t                block_ttl;
 } ngx_sentinel_loc_conf_t;
 
 /* -------------------------------------------------------------------------
@@ -329,6 +332,14 @@ ngx_int_t sentinel_shm_errrate_lookup(ngx_sentinel_zone_t *zone,
 ngx_int_t sentinel_shm_errrate_record(ngx_sentinel_zone_t *zone,
     ngx_str_t *key, time_t now,
     ngx_uint_t *count, time_t *blocked_until);
+
+/*
+ * sentinel_shm_softban_set — persist a self-ban (blocked_until = now + ttl)
+ * for `key` in the errrate `zone`.  Used by the BLOCK verdict path when
+ * sentinel_block_ttl > 0.  Returns NGX_OK / NGX_ERROR (caller fails open).
+ */
+ngx_int_t sentinel_shm_softban_set(ngx_sentinel_zone_t *zone,
+    ngx_str_t *key, time_t now, time_t ttl);
 
 /* -------------------------------------------------------------------------
  * JA4H API (sentinel_ja4h.c)

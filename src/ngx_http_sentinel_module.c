@@ -269,6 +269,14 @@ static ngx_command_t ngx_sentinel_commands[] = {
       offsetof(ngx_sentinel_loc_conf_t, block_status),
       NULL },
 
+    /* sentinel_block_ttl S;  default 0 (off); >0 persists a self-ban for S sec */
+    { ngx_string("sentinel_block_ttl"),
+      NGX_HTTP_MAIN_CONF | NGX_HTTP_SRV_CONF | NGX_HTTP_LOC_CONF | NGX_CONF_TAKE1,
+      ngx_conf_set_num_slot,
+      NGX_HTTP_LOC_CONF_OFFSET,
+      offsetof(ngx_sentinel_loc_conf_t, block_ttl),
+      NULL },
+
     /* ---- Phase 3: crowdsec decision-feed directives ---- */
 
     /* sentinel_crowdsec_zone name:size; — main context (declares the shm zone) */
@@ -866,6 +874,34 @@ ngx_sentinel_preaccess_handler(ngx_http_request_t *r)
         ngx_log_error(NGX_LOG_INFO, r->connection->log, 0,
                       "sentinel: verdict=block -> status=%i",
                       lcf->block_status);
+
+        /*
+         * TTL soft-ban: persist a self-ban in the errrate zone so subsequent
+         * requests from this identity short-circuit (errrate_lookup -> NGX_BUSY
+         * -> errrate_blocked -> w_blocked -> re-crosses the block band) for the
+         * TTL with no re-evaluation.  Fail-open: skip silently if no zone or on
+         * any shm error (the block itself still fires below).
+         */
+        if (lcf->block_ttl > 0 && lcf->zone != NULL) {
+            u_char     digest[NGX_SENTINEL_DIGEST_LEN];
+            ngx_str_t  key;
+
+            if (r->connection->addr_text.len != 0) {
+                SHA256(r->connection->addr_text.data,
+                       r->connection->addr_text.len, digest);
+                key.data = digest;
+                key.len  = NGX_SENTINEL_DIGEST_LEN;
+
+                if (sentinel_shm_softban_set(lcf->zone, &key, ngx_time(),
+                                             (time_t) lcf->block_ttl) != NGX_OK)
+                {
+                    ngx_log_error(NGX_LOG_WARN, r->connection->log, 0,
+                                  "sentinel: softban persist failed for zone "
+                                  "\"%V\" (fail-open)", &lcf->zone->name);
+                }
+            }
+        }
+
         /* 444 -> drop the connection without a response; else finalize with
          * the configured HTTP status (default 403). */
         return lcf->block_status;
@@ -1105,6 +1141,7 @@ ngx_sentinel_create_loc_conf(ngx_conf_t *cf)
     lcf->tarpit_bytes        = NGX_CONF_UNSET;
     lcf->tarpit_max_lifetime = NGX_CONF_UNSET;
     lcf->block_status        = NGX_CONF_UNSET;
+    lcf->block_ttl           = NGX_CONF_UNSET;
 
     return lcf;
 }
@@ -1301,6 +1338,14 @@ ngx_sentinel_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
     {
         ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
                            "sentinel_block_status must be 400..599 or 444");
+        return NGX_CONF_ERROR;
+    }
+
+    ngx_conf_merge_value(conf->block_ttl, prev->block_ttl, 0);
+
+    if (conf->block_ttl < 0) {
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                           "sentinel_block_ttl must be >= 0 (0 = off)");
         return NGX_CONF_ERROR;
     }
 
