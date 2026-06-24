@@ -80,6 +80,16 @@ static ngx_int_t ngx_sentinel_var_velocity(ngx_http_request_t *r,
     ngx_http_variable_value_t *v, uintptr_t data);
 static ngx_int_t ngx_sentinel_var_allowlist(ngx_http_request_t *r,
     ngx_http_variable_value_t *v, uintptr_t data);
+static ngx_int_t ngx_sentinel_var_bot(ngx_http_request_t *r,
+    ngx_http_variable_value_t *v, uintptr_t data);
+static ngx_int_t ngx_sentinel_var_scanner(ngx_http_request_t *r,
+    ngx_http_variable_value_t *v, uintptr_t data);
+static ngx_int_t ngx_sentinel_var_errrate(ngx_http_request_t *r,
+    ngx_http_variable_value_t *v, uintptr_t data);
+static ngx_int_t ngx_sentinel_var_crowdsec(ngx_http_request_t *r,
+    ngx_http_variable_value_t *v, uintptr_t data);
+static ngx_int_t ngx_sentinel_var_crowdsec_action(ngx_http_request_t *r,
+    ngx_http_variable_value_t *v, uintptr_t data);
 
 static ngx_sentinel_ctx_t *ngx_sentinel_get_ctx(ngx_http_request_t *r);
 
@@ -376,6 +386,21 @@ static ngx_http_variable_t ngx_sentinel_vars[] = {
     { ngx_string("sentinel_allowlist"), NULL,
       ngx_sentinel_var_allowlist, 0, NGX_HTTP_VAR_NOCACHEABLE, 0 },
 
+    { ngx_string("sentinel_bot"), NULL,
+      ngx_sentinel_var_bot, 0, NGX_HTTP_VAR_NOCACHEABLE, 0 },
+
+    { ngx_string("sentinel_scanner"), NULL,
+      ngx_sentinel_var_scanner, 0, NGX_HTTP_VAR_NOCACHEABLE, 0 },
+
+    { ngx_string("sentinel_errrate"), NULL,
+      ngx_sentinel_var_errrate, 0, NGX_HTTP_VAR_NOCACHEABLE, 0 },
+
+    { ngx_string("sentinel_crowdsec"), NULL,
+      ngx_sentinel_var_crowdsec, 0, NGX_HTTP_VAR_NOCACHEABLE, 0 },
+
+    { ngx_string("sentinel_crowdsec_action"), NULL,
+      ngx_sentinel_var_crowdsec_action, 0, NGX_HTTP_VAR_NOCACHEABLE, 0 },
+
     { ngx_null_string, NULL, NULL, 0, 0, 0 }
 };
 
@@ -601,6 +626,135 @@ ngx_sentinel_var_allowlist(ngx_http_request_t *r, ngx_http_variable_value_t *v,
 
     v->len  = 1;
     v->data = (u_char *) (ctx->inputs.allowlisted ? "1" : "0");
+    v->valid  = 1;
+    v->not_found   = 0;
+    v->no_cacheable = 0;
+
+    return NGX_OK;
+}
+
+static ngx_int_t
+ngx_sentinel_var_bot(ngx_http_request_t *r, ngx_http_variable_value_t *v,
+    uintptr_t data)
+{
+    ngx_sentinel_ctx_t  *ctx;
+
+    ctx = ngx_sentinel_get_ctx(r);
+    if (ctx == NULL) {
+        v->not_found = 1;
+        return NGX_OK;
+    }
+
+    v->len  = 1;
+    v->data = (u_char *) (ctx->inputs.bot_ua ? "1" : "0");
+    v->valid  = 1;
+    v->not_found   = 0;
+    v->no_cacheable = 0;
+
+    return NGX_OK;
+}
+
+static ngx_int_t
+ngx_sentinel_var_scanner(ngx_http_request_t *r, ngx_http_variable_value_t *v,
+    uintptr_t data)
+{
+    ngx_sentinel_ctx_t  *ctx;
+
+    ctx = ngx_sentinel_get_ctx(r);
+    if (ctx == NULL) {
+        v->not_found = 1;
+        return NGX_OK;
+    }
+
+    v->len  = 1;
+    v->data = (u_char *) (ctx->inputs.scanner_path ? "1" : "0");
+    v->valid  = 1;
+    v->not_found   = 0;
+    v->no_cacheable = 0;
+
+    return NGX_OK;
+}
+
+static ngx_int_t
+ngx_sentinel_var_errrate(ngx_http_request_t *r, ngx_http_variable_value_t *v,
+    uintptr_t data)
+{
+    ngx_sentinel_ctx_t  *ctx;
+    u_char              *p;
+
+    ctx = ngx_sentinel_get_ctx(r);
+    if (ctx == NULL) {
+        v->not_found = 1;
+        return NGX_OK;
+    }
+
+    p = ngx_pnalloc(r->pool, NGX_INT_T_LEN);
+    if (p == NULL) {
+        return NGX_ERROR;
+    }
+
+    v->len    = (u_int) (ngx_sprintf(p, "%ui", ctx->inputs.errrate_count) - p);
+    v->data   = p;
+    v->valid  = 1;
+    v->not_found   = 0;
+    v->no_cacheable = 0;
+
+    return NGX_OK;
+}
+
+static ngx_int_t
+ngx_sentinel_var_crowdsec(ngx_http_request_t *r, ngx_http_variable_value_t *v,
+    uintptr_t data)
+{
+    ngx_sentinel_ctx_t  *ctx;
+
+    ctx = ngx_sentinel_get_ctx(r);
+    if (ctx == NULL) {
+        v->not_found = 1;
+        return NGX_OK;
+    }
+
+    v->len  = 1;
+    v->data = (u_char *) (ctx->inputs.crowdsec_hit ? "1" : "0");
+    v->valid  = 1;
+    v->not_found   = 0;
+    v->no_cacheable = 0;
+
+    return NGX_OK;
+}
+
+/* crowdsec action tier as a stable lowercase token (none|ban|captcha|throttle)
+ * for human-readable structured logs; falls back to "none" for unknown tiers. */
+static const char *const sentinel_cs_action_strings[] = {
+    "none",      /* NGX_SENTINEL_CS_NONE     */
+    "ban",       /* NGX_SENTINEL_CS_BAN      */
+    "captcha",   /* NGX_SENTINEL_CS_CAPTCHA  */
+    "throttle"   /* NGX_SENTINEL_CS_THROTTLE */
+};
+
+static ngx_int_t
+ngx_sentinel_var_crowdsec_action(ngx_http_request_t *r,
+    ngx_http_variable_value_t *v, uintptr_t data)
+{
+    ngx_sentinel_ctx_t  *ctx;
+    const char          *s;
+    ngx_uint_t           act;
+
+    ctx = ngx_sentinel_get_ctx(r);
+    if (ctx == NULL) {
+        v->not_found = 1;
+        return NGX_OK;
+    }
+
+    act = (ngx_uint_t) ctx->inputs.crowdsec_action;
+    if (act >= (sizeof(sentinel_cs_action_strings)
+                / sizeof(sentinel_cs_action_strings[0]))) {
+        act = NGX_SENTINEL_CS_NONE;
+    }
+    s = sentinel_cs_action_strings[act];
+
+    v->len  = (u_int) ngx_strlen(s);
+    v->data = (u_char *) s;
     v->valid  = 1;
     v->not_found   = 0;
     v->no_cacheable = 0;
