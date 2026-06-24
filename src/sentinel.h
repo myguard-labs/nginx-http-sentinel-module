@@ -201,6 +201,10 @@ typedef struct {
     /* Velocity: request rate exceeded the configured threshold */
     ngx_flag_t  velocity_exceeded;
 
+    /* Allowlist: client IP matched an operator-trusted CIDR (forces score 0,
+     * unless a CrowdSec ban is present — see sentinel_score.c) */
+    ngx_flag_t  allowlisted;
+
     /* CrowdSec: IP present + unexpired in the crowdsec ban table */
     ngx_flag_t  crowdsec_hit;
     u_char      crowdsec_action;   /* NGX_SENTINEL_CS_* — verdict/score tiering */
@@ -282,6 +286,9 @@ typedef struct {
     /* Honeypot: decoy URL path prefixes (empty = signal off) */
     ngx_array_t              decoy_paths;         /* ngx_str_t[] honeypot decoy
                                                    * path prefixes (empty = signal off) */
+
+    /* Allowlist: operator-trusted client CIDRs (empty = signal off) */
+    ngx_array_t              allow_cidrs;         /* ngx_cidr_t[] trusted ranges */
 
     /* Phase 2 — tarpit parameters */
     ngx_int_t                tarpit_max_conns;    /* global cap across workers      */
@@ -373,6 +380,19 @@ void sentinel_header_signal(ngx_http_request_t *r,
  * Fail-open: NULL r / NULL lcf / empty decoy_paths → honeypot = 0.
  */
 void sentinel_honeypot_signal(ngx_http_request_t *r,
+    ngx_sentinel_loc_conf_t *lcf, ngx_sentinel_inputs_t *inputs);
+
+/* -------------------------------------------------------------------------
+ * Allowlist API (sentinel_allowlist.c)
+ * ---------------------------------------------------------------------- */
+
+/*
+ * sentinel_allowlist_signal — set inputs->allowlisted = 1 if the client IP
+ * matches any operator-configured CIDR in lcf->allow_cidrs (ngx_cidr_match,
+ * no regex, no malloc, no network). Fail-open: NULL r / NULL lcf / empty
+ * allow_cidrs / missing sockaddr → allowlisted = 0.
+ */
+void sentinel_allowlist_signal(ngx_http_request_t *r,
     ngx_sentinel_loc_conf_t *lcf, ngx_sentinel_inputs_t *inputs);
 
 /* -------------------------------------------------------------------------

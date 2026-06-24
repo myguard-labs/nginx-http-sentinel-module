@@ -136,6 +136,44 @@ http {
 }
 ```
 
+### Allowlist (CIDR)
+
+Operator-defined trusted IP ranges. If the client address matches any configured
+CIDR, `$sentinel_allowlist` is set to `1` and the score is **short-circuited to
+0** — every other signal is overridden. Intended for operator-**verified** ranges
+only: published search-engine CIDR blocks, internal monitoring, office egress.
+Pure in-memory match (`ngx_cidr_match`), no DNS, no network, no malloc in the
+request path.
+
+> **Security:** the allowlist does **not** nullify a CrowdSec ban. A deployed
+> CrowdSec feed is the operator explicitly marking an IP malicious; if a trusted
+> range is later compromised, the ban still applies (same auth-bypass guard as
+> the `known_good_ua` short-circuit). Forward-confirmed reverse DNS (FCrDNS)
+> verification of self-declaring crawlers is a separate, async follow-up — this
+> directive is the static, request-path-safe half.
+
+| Directive | Default | Description |
+|---|---|---|
+| `sentinel_allowlist <ip\|cidr> [...];` | — | One or more trusted IPv4/IPv6 addresses or CIDR ranges (space-separated; repeatable; child inherits parent if not overridden). A client in any range is exempt from scoring unless a CrowdSec ban is present. |
+
+**Variable:** `$sentinel_allowlist` — `1` if the client IP matched a trusted
+range, `0` otherwise.
+
+**Example:**
+
+```nginx
+http {
+    server {
+        sentinel_allowlist 66.249.64.0/19 10.0.0.0/8 192.0.2.10;
+
+        location / {
+            sentinel on;
+            sentinel_mode enforce;
+        }
+    }
+}
+```
+
 ### Tarpit (location context)
 
 When the verdict is `tarpit`, the connection is held by a bounded "drip" writer

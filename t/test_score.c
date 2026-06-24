@@ -81,6 +81,7 @@ typedef struct {
     ngx_flag_t  header_anomaly;
     ngx_flag_t  honeypot;
     ngx_flag_t  velocity_exceeded;
+    ngx_flag_t  allowlisted;
     ngx_flag_t  crowdsec_hit;
     u_char      crowdsec_action;
 } ngx_sentinel_inputs_t;
@@ -478,6 +479,40 @@ main(void)
     inp.velocity_exceeded = 0;
     ASSERT_EQ("velocity=0 → 0",
               sentinel_score_compute(&inp, &lcf), 0);
+
+    /* ------------------------------------------------------------------
+     * (i) Allowlist short-circuit: allowlisted forces 0, but a CrowdSec ban
+     *     overrides it (same auth-bypass guard as known_good_ua).
+     * ------------------------------------------------------------------ */
+
+    /* allowlisted=1, every heuristic active, no ban → short-circuit to 0. */
+    lcf = make_lcf(NGX_SENTINEL_DEFAULT_W_ERRRATE,
+                   NGX_SENTINEL_DEFAULT_W_BLOCKED,
+                   NGX_SENTINEL_DEFAULT_W_SCANNER,
+                   NGX_SENTINEL_DEFAULT_W_BOT);
+    lcf.weights.honeypot = NGX_SENTINEL_DEFAULT_W_HONEYPOT;
+    inp = make_inputs(64, 1, 1, 1, 0);   /* all heuristics, NO good-UA */
+    inp.honeypot = 1;
+    inp.allowlisted = 1;
+    ASSERT_EQ("allowlisted short-circuits heuristics to 0",
+              sentinel_score_compute(&inp, &lcf), 0);
+
+    /* allowlisted=1 but CrowdSec ban present → score falls through, ban applies. */
+    inp = make_inputs(0, 0, 0, 0, 0);
+    inp.allowlisted = 1;
+    inp.crowdsec_hit = 1;
+    inp.crowdsec_action = NGX_SENTINEL_CS_BAN;
+    ASSERT_EQ("allowlist does NOT nullify crowdsec ban",
+              sentinel_score_compute(&inp, &lcf),
+              NGX_SENTINEL_DEFAULT_W_CROWDSEC);
+
+    /* allowlisted=0 → no effect, heuristics score normally. */
+    lcf = make_lcf(0, 0, NGX_SENTINEL_DEFAULT_W_SCANNER, 0);
+    inp = make_inputs(0, 0, 1, 0, 0);
+    inp.allowlisted = 0;
+    ASSERT_EQ("allowlisted=0 → scanner scores normally",
+              sentinel_score_compute(&inp, &lcf),
+              NGX_SENTINEL_DEFAULT_W_SCANNER);
 
     /* ------------------------------------------------------------------
      * Summary
