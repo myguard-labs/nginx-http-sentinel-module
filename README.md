@@ -192,6 +192,18 @@ passes.
 | `sentinel_tarpit_bytes N;` | `1024` | `1`–`65536` | Total bytes dripped before the response completes. |
 | `sentinel_tarpit_max_lifetime ms;` | `30000` | `1000`–`600000` | Hard ceiling on how long a tarpitted connection is held; force-closed at the deadline regardless of drip progress. |
 
+### Block (location / server / http context)
+
+When the verdict is `block`, the request is denied in the `PREACCESS` phase.
+By default the configured HTTP status (`403`) is returned; the special value
+`444` drops the connection without any response (nginx's non-standard close).
+Only active in `enforce` mode; in `shadow` mode a `verdict=block` line is logged
+and the request passes.
+
+| Directive | Default | Bounds | Description |
+|---|---|---|---|
+| `sentinel_block_status N;` | `403` | `400`–`599`, or `444` | HTTP status returned for a `block` verdict. `444` closes the connection with no response. |
+
 ### CrowdSec feed (out-of-band)
 
 Sentinel never queries CrowdSec from the request path. An external sidecar (the
@@ -244,7 +256,7 @@ prevent integer overflow from pathological weight × count products.
 
 | Score range | Verdict |
 |---|---|
-| ≥ 80 | block (403) |
+| ≥ 80 | block (`sentinel_block_status`, default `403`; `444` = drop) |
 | 60 – 79 | tarpit (garbage drip) |
 | 30 – 59 | challenge (PoW / js-challenge) |
 | 0 – 29 | allow |

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import http.client
 import os
 import pathlib
 import re
@@ -288,6 +289,32 @@ http {{
             return 200 "allowmiss";
         }}
 
+        # Block enforcement (enforce mode). Bot UA (sqlmap) scores >= block
+        # threshold (set to 1) -> VERDICT_BLOCK. Like the tarpit locations we
+        # serve a static file ({root}/html/block) so the request reaches the
+        # PREACCESS handler (a `return` directive in REWRITE would finalize
+        # first). Default sentinel_block_status (403) must be returned.
+        location = /block {{
+            sentinel on;
+            sentinel_mode enforce;
+            sentinel_threshold challenge=0 tarpit=0 block=1;
+        }}
+
+        # Same, but block_status 444 -> connection dropped (empty reply).
+        location = /block-close {{
+            sentinel on;
+            sentinel_mode enforce;
+            sentinel_threshold challenge=0 tarpit=0 block=1;
+            sentinel_block_status 444;
+        }}
+
+        # Block in shadow mode: must NOT enforce -> static file served (200).
+        location = /block-shadow {{
+            sentinel on;
+            sentinel_mode shadow;
+            sentinel_threshold challenge=0 tarpit=0 block=1;
+        }}
+
 {cs_block}    }}
 }}
 """
@@ -328,7 +355,8 @@ class Nginx:
         html.mkdir(parents=True, exist_ok=True)
         # Static targets for the tarpit/shadow/cs locations (served in the
         # CONTENT phase so PREACCESS — and the sentinel handler — runs).
-        for name in ("tarpit", "tarpit-life", "tarpit-shadow", "cs"):
+        for name in ("tarpit", "tarpit-life", "tarpit-shadow", "cs",
+                     "block", "block-close", "block-shadow"):
             (html / name).write_text("ok\n", encoding="ascii")
         (self.root / "conf" / "nginx.conf").write_text(
             nginx_config(self.root, self.port, self.module, workers,
@@ -562,6 +590,8 @@ def test_tarpit_bounds_parse(nginx: "Nginx") -> None:
         ("sentinel_tarpit_max_lifetime 500", "lifetime 500ms below 1000 lower bound"),
         ("sentinel_tarpit_max_lifetime 999999999",
          "lifetime above 600000 upper bound"),
+        ("sentinel_block_status 200", "block_status 200 below 400 lower bound"),
+        ("sentinel_block_status 600", "block_status 600 above 599 upper bound"),
     ]
 
     load = f"load_module {nginx.module};\n" if nginx.module else ""
@@ -1079,6 +1109,31 @@ def main() -> int:
                     f">= 90; got {miss_score}")
             print(f"  TEST 9 allowlist: PASS "
                   f"(match={allow_score}, miss={miss_score})")
+
+            # TEST 10: block enforcement. Bot UA forces VERDICT_BLOCK.
+            #  - /block (enforce, default status) -> 403
+            #  - /block-shadow (shadow) -> 200 (no enforcement)
+            #  - /block-close (status 444) -> connection dropped (no response)
+            expect_status(args.port, "/block", 403,
+                          extra_headers={"User-Agent": BOT_UA})
+            expect_status(args.port, "/block-shadow", 200,
+                          extra_headers={"User-Agent": BOT_UA})
+            # NOTE: no clean-UA pass assertion here — TEST 5 hammered the shared
+            # 127.0.0.1 identity with 404s, so accumulated errrate can push even
+            # a clean request >= block=1. Shadow proves the non-enforce path.
+            # 444: nginx closes without sending a response. urllib raises
+            # RemoteDisconnected (an OSError subclass) — that IS the pass.
+            try:
+                close_status, _, _ = fetch(args.port, "/block-close",
+                                           extra_headers={"User-Agent": BOT_UA})
+            except (OSError, http.client.RemoteDisconnected):
+                close_status = 0
+            if close_status not in (0, 444):
+                raise AssertionError(
+                    f"TEST 10 block-close: expected dropped connection "
+                    f"(status 0/444), got {close_status}")
+            print("  TEST 10 block-enforce: PASS "
+                  f"(block=403, shadow=200, close={close_status})")
 
             nginx.stop()
             nginx.assert_clean_logs()

@@ -261,6 +261,14 @@ static ngx_command_t ngx_sentinel_commands[] = {
       0,
       NULL },
 
+    /* sentinel_block_status N;  default 403; 444=drop conn; bounds [400,599] */
+    { ngx_string("sentinel_block_status"),
+      NGX_HTTP_MAIN_CONF | NGX_HTTP_SRV_CONF | NGX_HTTP_LOC_CONF | NGX_CONF_TAKE1,
+      ngx_conf_set_num_slot,
+      NGX_HTTP_LOC_CONF_OFFSET,
+      offsetof(ngx_sentinel_loc_conf_t, block_status),
+      NULL },
+
     /* ---- Phase 3: crowdsec decision-feed directives ---- */
 
     /* sentinel_crowdsec_zone name:size; — main context (declares the shm zone) */
@@ -855,10 +863,12 @@ ngx_sentinel_preaccess_handler(ngx_http_request_t *r)
         }
 
     case NGX_SENTINEL_VERDICT_BLOCK:
-        /* TODO Phase 2: return 403 / 444 */
         ngx_log_error(NGX_LOG_INFO, r->connection->log, 0,
-                      "sentinel: verdict=block (enforce deferred Phase 2)");
-        return NGX_DECLINED;
+                      "sentinel: verdict=block -> status=%i",
+                      lcf->block_status);
+        /* 444 -> drop the connection without a response; else finalize with
+         * the configured HTTP status (default 403). */
+        return lcf->block_status;
     }
 
     return NGX_DECLINED;
@@ -1094,6 +1104,7 @@ ngx_sentinel_create_loc_conf(ngx_conf_t *cf)
     lcf->tarpit_delay        = NGX_CONF_UNSET;
     lcf->tarpit_bytes        = NGX_CONF_UNSET;
     lcf->tarpit_max_lifetime = NGX_CONF_UNSET;
+    lcf->block_status        = NGX_CONF_UNSET;
 
     return lcf;
 }
@@ -1278,6 +1289,18 @@ ngx_sentinel_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
         ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
                            "sentinel_tarpit_max_lifetime must be 1000..%d ms",
                            NGX_SENTINEL_TARPIT_MAX_MSEC);
+        return NGX_CONF_ERROR;
+    }
+
+    ngx_conf_merge_value(conf->block_status, prev->block_status,
+                         NGX_SENTINEL_DEFAULT_BLOCK_STATUS);
+
+    /* 444 = special "drop connection" sentinel; otherwise a real HTTP status. */
+    if (conf->block_status != NGX_HTTP_CLOSE
+        && (conf->block_status < 400 || conf->block_status > 599))
+    {
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                           "sentinel_block_status must be 400..599 or 444");
         return NGX_CONF_ERROR;
     }
 
