@@ -15,6 +15,7 @@ ngx_module_srcs="$ngx_addon_dir/src/ngx_http_sentinel_module.c \
                  $ngx_addon_dir/src/sentinel_velocity.c \
                  $ngx_addon_dir/src/sentinel_asn.c \
                  $ngx_addon_dir/src/sentinel_ja4sig.c \
+                 $ngx_addon_dir/src/sentinel_ja4tsig.c \
                  $ngx_addon_dir/src/sentinel_coherence.c \
                  $ngx_addon_dir/src/sentinel_fcrdns.c \
                  $ngx_addon_dir/src/sentinel_pow.c \

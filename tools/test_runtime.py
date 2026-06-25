@@ -168,6 +168,15 @@ http {{
         default "";
         "~." $http_x_test_ja4;
     }}
+
+    # TEST 24 (JA4T-TCP signal): synthesize a JA4T variable from a test header.
+    # In production the operator maps a PROXY-protocol TLV var (e.g.
+    # $proxy_protocol_tlv_0xe0) here instead - no core patch, nginx exposes the
+    # custom TLV natively. This avoids a PROXY-protocol listener in the test.
+    map $http_x_test_ja4t $test_ja4t {{
+        default "";
+        "~." $http_x_test_ja4t;
+    }}
 {cs_zone}{redis_zone}
 
     server {{
@@ -500,6 +509,21 @@ http {{
             sentinel_ja4_deny T13D1516H2_8DAAF6152771_B186095E22B6;
             access_log {root}/logs/ja4.log sentinelvars;
             return 200 "ja4";
+        }}
+
+        # TEST 24 (JA4T-TCP signal): shadow mode. weight_bot/velocity zeroed so
+        # the delta is purely the JA4T term (default w_ja4t 45). Client controls
+        # the JA4T via X-Test-JA4T, fed through $test_ja4t into sentinel_ja4t.
+        # Case-insensitive match: deny entry upper-case, request lower-case.
+        location = /ja4t {{
+            sentinel on;
+            sentinel_mode shadow;
+            sentinel_weight_bot 0;
+            sentinel_weight_velocity 0;
+            sentinel_ja4t $test_ja4t;
+            sentinel_ja4t_deny T13D1516H2_8DAAF6152771_B186095E22B6;
+            access_log {root}/logs/ja4t.log sentinelvars;
+            return 200 "ja4t";
         }}
 
         # TEST 16 (coherence signal): shadow mode. weight_bot/velocity zeroed so
@@ -1800,6 +1824,39 @@ def main() -> int:
                     f"(w_ja4); got hit={ja4_hit} miss={ja4_miss}")
             print(f"  TEST 23 ja4: PASS "
                   f"(hit={ja4_hit}, miss={ja4_miss}, none={ja4_none})")
+
+            # TEST 24: JA4T-TCP signal. Same shape as TEST 23 but the JA4T comes
+            # from X-Test-JA4T (in prod: a PROXY-protocol custom TLV). Denied fp
+            # (lower-case vs upper-case deny -> case-insensitive) must score
+            # >= w_ja4t (45); a different JA4T and no header must both score 0.
+            denied_ja4t = "t13d1516h2_8daaf6152771_b186095e22b6"
+            fetch(args.port, "/ja4t", extra_headers={"X-Test-JA4T": denied_ja4t})
+            fetch(args.port, "/ja4t", extra_headers={"X-Test-JA4T": "t13d0000h1_deadbeefcafe_000000000000"})
+            fetch(args.port, "/ja4t")
+            time.sleep(0.3)
+
+            ja4t_log = root / "server" / "logs" / "ja4t.log"
+            if not ja4t_log.exists():
+                raise AssertionError("ja4t.log not written")
+            jtlines = [ln.split() for ln in
+                       ja4t_log.read_text(encoding="utf-8").splitlines()
+                       if ln.strip()]
+            if len(jtlines) < 3:
+                raise AssertionError(
+                    f"ja4t.log: expected >= 3 lines, got {len(jtlines)}")
+            ja4t_hit  = int(jtlines[0][1])   # denied fp -> flagged
+            ja4t_miss = int(jtlines[1][1])   # other fp  -> not flagged
+            ja4t_none = int(jtlines[2][1])   # no header -> empty -> off
+            if ja4t_miss != ja4t_none:
+                raise AssertionError(
+                    f"TEST 24 ja4t: unflagged and missing JA4T must score equally; "
+                    f"got miss={ja4t_miss} none={ja4t_none}")
+            if ja4t_hit - ja4t_miss < 45:
+                raise AssertionError(
+                    f"TEST 24 ja4t: denied JA4T must exceed control by >= 45 "
+                    f"(w_ja4t); got hit={ja4t_hit} miss={ja4t_miss}")
+            print(f"  TEST 24 ja4t: PASS "
+                  f"(hit={ja4t_hit}, miss={ja4t_miss}, none={ja4t_none})")
 
             # TEST 16: coherence signal. A browser-claiming UA with a bare
             # request (no Accept / Accept-Language / gzip) is incoherent and must
