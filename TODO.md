@@ -76,7 +76,26 @@ Only if traffic shows JA4H/H2 evasion. Both need core surface beyond pure HTTP.
       OLD plan (obsolete): "apply ssl-fingerprint patch + port byte-parse into
         sentinel_ja4.c" — unnecessary, the module already does the ClientHello
         parse and gives the var.
-- [ ] `[opus-low]` JA4T: proxy_protocol v2 TLV → JA4T var → score.
+- [ ] `[opus]` **JA4T (TLS-transport / TCP fp) — GATED, needs a JA4T SOURCE VAR first (verified 2026-06-25, no source exists).**
+      Investigated: the ssl-fingerprint module exposes ONLY ja4/ja4_r/ja4_ro/ja4_o
+      (all ClientHello-derived). It does NOT and CANNOT produce JA4T — JA4T is a
+      TCP/transport fingerprint (SYN window size, TCP options order, MSS), a
+      DIFFERENT LAYER than the TLS ClientHello. Extending ssl-fingerprint's patch
+      will NOT yield it (wrong layer).
+      Two real source paths, both core surface + traffic-gated:
+      1. **proxy_protocol v2 TLV** — if an upstream LB (haproxy/edge) computes
+         JA4T and passes it in a PPv2 TLV, nginx must expose that TLV as a var
+         (core has `$proxy_protocol_tlv_0xNN` in recent versions — CHECK the
+         packaged nginx version supports custom TLV vars; if so this is the
+         no-patch path). Then sentinel reads it EXACTLY like sentinel_ja4sig.c:
+         `sentinel_ja4t $proxy_protocol_tlv_0xE0;` + `sentinel_ja4t_deny ...;`.
+      2. **core socket-opt patch** — read SO_* / TCP_INFO at accept, compute JA4T
+         in-core, expose `$tcp_ja4t`. Multi-file core patch (nginx + angie),
+         zero-fuzz refresh required. Heavy.
+      **Sentinel side is trivial once a var exists** — clone sentinel_ja4sig.c to
+      sentinel_ja4tsig.c (s/ja4/ja4t/, w_ja4t ~45), same ASN/JA4 pattern. The
+      whole cost is producing the source var. DO PATH 1 FIRST (check PPv2 TLV var
+      support) — only fall to path 2 if no LB/TLV is in the deployment.
 
 ## Roadmap (post-core, incremental — layered on the score-then-act pipeline)
 Each = own small PR. Full catalog + config examples: the pitch page (DESIGN.md links it).
