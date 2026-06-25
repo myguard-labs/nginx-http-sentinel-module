@@ -56,6 +56,7 @@ typedef int            ngx_flag_t;
 #define NGX_SENTINEL_DEFAULT_W_ASN     35
 #define NGX_SENTINEL_DEFAULT_W_COHERENCE 40
 #define NGX_SENTINEL_DEFAULT_W_JA4     50
+#define NGX_SENTINEL_DEFAULT_W_JA4T    45
 #define NGX_SENTINEL_DEFAULT_W_CROWDSEC 100
 
 #define NGX_SENTINEL_CS_NONE      0
@@ -89,6 +90,7 @@ typedef struct {
     ngx_flag_t  datacenter_asn;
     ngx_flag_t  ua_incoherent;
     ngx_flag_t  ja4_flagged;
+    ngx_flag_t  ja4t_flagged;
     ngx_flag_t  allowlisted;
     ngx_flag_t  crowdsec_hit;
     u_char      crowdsec_action;
@@ -111,6 +113,7 @@ typedef struct {
     ngx_int_t  asn;       /* added once if datacenter_asn   */
     ngx_int_t  coherence; /* added once if ua_incoherent    */
     ngx_int_t  ja4;       /* added once if ja4_flagged       */
+    ngx_int_t  ja4t;      /* added once if ja4t_flagged      */
     ngx_int_t  crowdsec;
 } ngx_sentinel_weights_t;
 
@@ -169,6 +172,7 @@ make_lcf(ngx_int_t w_errrate, ngx_int_t w_blocked,
     lcf.weights.asn      = 0;  /* caller sets explicitly when testing asn */
     lcf.weights.coherence = 0; /* caller sets explicitly when testing coherence */
     lcf.weights.ja4      = 0;  /* caller sets explicitly when testing ja4 */
+    lcf.weights.ja4t     = 0;  /* caller sets explicitly when testing ja4t */
     lcf.weights.crowdsec = NGX_SENTINEL_DEFAULT_W_CROWDSEC;
     lcf.threshold.challenge = NGX_SENTINEL_DEFAULT_THRESH_CH;
     lcf.threshold.tarpit    = NGX_SENTINEL_DEFAULT_THRESH_TP;
@@ -595,6 +599,33 @@ main(void)
     inp = make_inputs(0, 0, 0, 0, 0);
     inp.ja4_flagged = 0;
     ASSERT_EQ("ja4=0 → 0", sentinel_score_compute(&inp, &lcf), 0);
+
+    /* ------------------------------------------------------------------
+     * (h4b) JA4T (TCP) signal: inputs->ja4t_flagged adds w_ja4t once.
+     * ------------------------------------------------------------------ */
+
+    /* ja4t_flagged=1, weight=45 → score 45. */
+    lcf = make_lcf(0, 0, 0, 0);
+    lcf.weights.ja4t = NGX_SENTINEL_DEFAULT_W_JA4T;
+    inp = make_inputs(0, 0, 0, 0, 0);
+    inp.ja4t_flagged = 1;
+    ASSERT_EQ("ja4t only: 45",
+              sentinel_score_compute(&inp, &lcf), 45);
+
+    /* ja4t + bot combined: 45 + 30 = 75. */
+    lcf = make_lcf(0, 0, 0, NGX_SENTINEL_DEFAULT_W_BOT);
+    lcf.weights.ja4t = NGX_SENTINEL_DEFAULT_W_JA4T;
+    inp = make_inputs(0, 0, 0, 1, 0);
+    inp.ja4t_flagged = 1;
+    ASSERT_EQ("ja4t + bot: 45 + 30 = 75",
+              sentinel_score_compute(&inp, &lcf), 75);
+
+    /* ja4t_flagged=0 → no contribution. */
+    lcf = make_lcf(0, 0, 0, 0);
+    lcf.weights.ja4t = NGX_SENTINEL_DEFAULT_W_JA4T;
+    inp = make_inputs(0, 0, 0, 0, 0);
+    inp.ja4t_flagged = 0;
+    ASSERT_EQ("ja4t=0 → 0", sentinel_score_compute(&inp, &lcf), 0);
 
     /* ------------------------------------------------------------------
      * (i) Allowlist short-circuit: allowlisted forces 0, but a CrowdSec ban

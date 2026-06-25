@@ -63,6 +63,7 @@
 #define NGX_SENTINEL_DEFAULT_W_ASN     35    /* request from a flagged datacenter/abuse ASN */
 #define NGX_SENTINEL_DEFAULT_W_COHERENCE 40  /* UA claims a browser but request shape disagrees */
 #define NGX_SENTINEL_DEFAULT_W_JA4     50    /* client JA4 (TLS) fp on operator deny list */
+#define NGX_SENTINEL_DEFAULT_W_JA4T    45    /* client JA4T (TCP) fp on operator deny list */
 #define NGX_SENTINEL_VELOCITY_DEFAULT_THRESHOLD 100  /* requests per window */
 #define NGX_SENTINEL_VELOCITY_DEFAULT_WINDOW    10   /* seconds */
 
@@ -275,6 +276,7 @@ typedef enum {
     NGX_SENTINEL_M_SIG_COHERENCE,
     NGX_SENTINEL_M_SIG_CROWDSEC,
     NGX_SENTINEL_M_SIG_JA4,
+    NGX_SENTINEL_M_SIG_JA4T,
 
     NGX_SENTINEL_M_SHADOW,          /* shadow_total (would-block in shadow)  */
 
@@ -382,6 +384,11 @@ typedef struct {
      * operator's deny list */
     ngx_flag_t  ja4_flagged;
 
+    /* JA4T (TCP): client's JA4T transport fingerprint (from an operator-
+     * supplied PROXY-protocol TLV variable, e.g. $proxy_protocol_tlv_0xe0)
+     * matched the operator's deny list */
+    ngx_flag_t  ja4t_flagged;
+
     /* Allowlist: client IP matched an operator-trusted CIDR (forces score 0,
      * unless a CrowdSec ban is present — see sentinel_score.c) */
     ngx_flag_t  allowlisted;
@@ -437,6 +444,7 @@ typedef struct {
     ngx_int_t  asn;       /* added once if datacenter_asn      */
     ngx_int_t  coherence; /* added once if ua_incoherent       */
     ngx_int_t  ja4;       /* added once if ja4_flagged          */
+    ngx_int_t  ja4t;      /* added once if ja4t_flagged         */
     ngx_int_t  crowdsec;  /* base weight for a crowdsec ban hit (tiered) */
 } ngx_sentinel_weights_t;
 
@@ -492,6 +500,13 @@ typedef struct {
      * ssl-fingerprint module owns the ClientHello parse. */
     ngx_http_complex_value_t *ja4_source;         /* NULL = signal off */
     ngx_array_t              ja4_list;            /* ngx_str_t[] denied JA4 fps */
+
+    /* JA4T (TCP) signal: operator points sentinel_ja4t at a PROXY-protocol TLV
+     * variable (e.g. $proxy_protocol_tlv_0xe0) carrying a JA4T computed by an
+     * upstream LB; the value is matched (case-insensitive) against ja4t_list at
+     * request time. No core patch — nginx exposes the custom TLV natively. */
+    ngx_http_complex_value_t *ja4t_source;        /* NULL = signal off */
+    ngx_array_t              ja4t_list;           /* ngx_str_t[] denied JA4T fps */
 
     /* FCrDNS verify: when on, a known_good_ua (self-declared crawler) triggers
      * an async PTR + forward-confirm of the client IP. The verdict is cached in
@@ -705,6 +720,16 @@ void sentinel_asn_signal(ngx_http_request_t *r,
  * path. Fail-open: NULL args / no source / empty list / empty value → 0.
  */
 void sentinel_ja4_signal(ngx_http_request_t *r,
+    ngx_sentinel_loc_conf_t *lcf, ngx_sentinel_inputs_t *inputs);
+
+/*
+ * sentinel_ja4t_signal — evaluate lcf->ja4t_source (an operator-supplied
+ * PROXY-protocol TLV variable, e.g. $proxy_protocol_tlv_0xe0) and set
+ * inputs->ja4t_flagged = 1 if its value matches (case-insensitive) any entry
+ * in lcf->ja4t_list. No core patch, no malloc in the request path. Fail-open:
+ * NULL args / no source / empty list / empty value → 0.
+ */
+void sentinel_ja4t_signal(ngx_http_request_t *r,
     ngx_sentinel_loc_conf_t *lcf, ngx_sentinel_inputs_t *inputs);
 
 /* -------------------------------------------------------------------------

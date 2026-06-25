@@ -73,6 +73,10 @@ static char *sentinel_conf_ja4_source(ngx_conf_t *cf,
     ngx_command_t *cmd, void *conf);
 static char *sentinel_conf_ja4_deny(ngx_conf_t *cf,
     ngx_command_t *cmd, void *conf);
+static char *sentinel_conf_ja4t_source(ngx_conf_t *cf,
+    ngx_command_t *cmd, void *conf);
+static char *sentinel_conf_ja4t_deny(ngx_conf_t *cf,
+    ngx_command_t *cmd, void *conf);
 static char *ngx_sentinel_set_velocity_zone(ngx_conf_t *cf,
     ngx_command_t *cmd, void *conf);
 static char *ngx_sentinel_set_velocity_bind(ngx_conf_t *cf,
@@ -101,6 +105,8 @@ static ngx_int_t ngx_sentinel_var_velocity(ngx_http_request_t *r,
 static ngx_int_t ngx_sentinel_var_asn(ngx_http_request_t *r,
     ngx_http_variable_value_t *v, uintptr_t data);
 static ngx_int_t ngx_sentinel_var_ja4(ngx_http_request_t *r,
+    ngx_http_variable_value_t *v, uintptr_t data);
+static ngx_int_t ngx_sentinel_var_ja4t(ngx_http_request_t *r,
     ngx_http_variable_value_t *v, uintptr_t data);
 static ngx_int_t ngx_sentinel_var_coherence(ngx_http_request_t *r,
     ngx_http_variable_value_t *v, uintptr_t data);
@@ -289,6 +295,30 @@ static ngx_command_t ngx_sentinel_commands[] = {
     { ngx_string("sentinel_ja4_deny"),
       NGX_HTTP_MAIN_CONF | NGX_HTTP_SRV_CONF | NGX_HTTP_LOC_CONF | NGX_CONF_1MORE,
       sentinel_conf_ja4_deny,
+      NGX_HTTP_LOC_CONF_OFFSET,
+      0,
+      NULL },
+
+    /* sentinel_weight_ja4t N; — added once if ja4t_flagged */
+    { ngx_string("sentinel_weight_ja4t"),
+      NGX_HTTP_MAIN_CONF | NGX_HTTP_SRV_CONF | NGX_HTTP_LOC_CONF | NGX_CONF_TAKE1,
+      ngx_conf_set_num_slot,
+      NGX_HTTP_LOC_CONF_OFFSET,
+      offsetof(ngx_sentinel_loc_conf_t, weights.ja4t),
+      NULL },
+
+    /* sentinel_ja4t <variable>; — PROXY-protocol TLV JA4T source (e.g. $proxy_protocol_tlv_0xe0) */
+    { ngx_string("sentinel_ja4t"),
+      NGX_HTTP_MAIN_CONF | NGX_HTTP_SRV_CONF | NGX_HTTP_LOC_CONF | NGX_CONF_TAKE1,
+      sentinel_conf_ja4t_source,
+      NGX_HTTP_LOC_CONF_OFFSET,
+      0,
+      NULL },
+
+    /* sentinel_ja4t_deny <ja4t|hash> [...]; — denied JA4T (TCP) fingerprint list */
+    { ngx_string("sentinel_ja4t_deny"),
+      NGX_HTTP_MAIN_CONF | NGX_HTTP_SRV_CONF | NGX_HTTP_LOC_CONF | NGX_CONF_1MORE,
+      sentinel_conf_ja4t_deny,
       NGX_HTTP_LOC_CONF_OFFSET,
       0,
       NULL },
@@ -671,6 +701,9 @@ static ngx_http_variable_t ngx_sentinel_vars[] = {
     { ngx_string("sentinel_ja4"), NULL,
       ngx_sentinel_var_ja4, 0, NGX_HTTP_VAR_NOCACHEABLE, 0 },
 
+    { ngx_string("sentinel_ja4t"), NULL,
+      ngx_sentinel_var_ja4t, 0, NGX_HTTP_VAR_NOCACHEABLE, 0 },
+
     { ngx_string("sentinel_coherence"), NULL,
       ngx_sentinel_var_coherence, 0, NGX_HTTP_VAR_NOCACHEABLE, 0 },
 
@@ -761,6 +794,7 @@ ngx_sentinel_get_ctx(ngx_http_request_t *r)
     sentinel_velocity_signal(r, lcf, &ctx->inputs);
     sentinel_asn_signal(r, lcf, &ctx->inputs);
     sentinel_ja4_signal(r, lcf, &ctx->inputs);
+    sentinel_ja4t_signal(r, lcf, &ctx->inputs);
     sentinel_coherence_signal(r, &ctx->inputs);
     sentinel_fcrdns_signal(r, lcf, &ctx->inputs);
     sentinel_crowdsec_signal(r, lcf, &ctx->inputs);
@@ -955,6 +989,27 @@ ngx_sentinel_var_ja4(ngx_http_request_t *r, ngx_http_variable_value_t *v,
 
     v->len  = 1;
     v->data = (u_char *) (ctx->inputs.ja4_flagged ? "1" : "0");
+    v->valid  = 1;
+    v->not_found   = 0;
+    v->no_cacheable = 0;
+
+    return NGX_OK;
+}
+
+static ngx_int_t
+ngx_sentinel_var_ja4t(ngx_http_request_t *r, ngx_http_variable_value_t *v,
+    uintptr_t data)
+{
+    ngx_sentinel_ctx_t  *ctx;
+
+    ctx = ngx_sentinel_get_ctx(r);
+    if (ctx == NULL) {
+        v->not_found = 1;
+        return NGX_OK;
+    }
+
+    v->len  = 1;
+    v->data = (u_char *) (ctx->inputs.ja4t_flagged ? "1" : "0");
     v->valid  = 1;
     v->not_found   = 0;
     v->no_cacheable = 0;
@@ -1262,7 +1317,7 @@ ngx_sentinel_preaccess_handler(ngx_http_request_t *r)
     ngx_log_error(NGX_LOG_INFO, r->connection->log, 0,
                   "sentinel: score=%i verdict=%s ja4h=%s "
                   "shadow=%i errrate=%ui bot=%i scanner=%i header=%i "
-                  "honeypot=%i velocity=%i asn=%i ja4=%i coherence=%i "
+                  "honeypot=%i velocity=%i asn=%i ja4=%i ja4t=%i coherence=%i "
                   "fcrdns_verified=%i fcrdns_spoofed=%i "
                   "allowlist=%i crowdsec=%i cs_action=%ui pow=%ui",
                   ctx->score,
@@ -1277,6 +1332,7 @@ ngx_sentinel_preaccess_handler(ngx_http_request_t *r)
                   (ngx_int_t) ctx->inputs.velocity_exceeded,
                   (ngx_int_t) ctx->inputs.datacenter_asn,
                   (ngx_int_t) ctx->inputs.ja4_flagged,
+                  (ngx_int_t) ctx->inputs.ja4t_flagged,
                   (ngx_int_t) ctx->inputs.ua_incoherent,
                   (ngx_int_t) ctx->inputs.fcrdns_verified,
                   (ngx_int_t) ctx->inputs.fcrdns_spoofed,
@@ -1693,6 +1749,8 @@ ngx_sentinel_create_loc_conf(ngx_conf_t *cf)
     lcf->weights.asn     = NGX_CONF_UNSET;
     /* ja4_source NULL + ja4_list empty via pcalloc; opt-in signal. */
     lcf->weights.ja4     = NGX_CONF_UNSET;
+    /* ja4t_source NULL + ja4t_list empty via pcalloc; opt-in signal. */
+    lcf->weights.ja4t    = NGX_CONF_UNSET;
     lcf->weights.coherence = NGX_CONF_UNSET;
 
     lcf->cs_zone         = NGX_CONF_UNSET_PTR;
@@ -1781,6 +1839,9 @@ ngx_sentinel_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
     ngx_conf_merge_value(conf->weights.ja4,
                          prev->weights.ja4,
                          NGX_SENTINEL_DEFAULT_W_JA4);
+    ngx_conf_merge_value(conf->weights.ja4t,
+                         prev->weights.ja4t,
+                         NGX_SENTINEL_DEFAULT_W_JA4T);
     ngx_conf_merge_value(conf->weights.coherence,
                          prev->weights.coherence,
                          NGX_SENTINEL_DEFAULT_W_COHERENCE);
@@ -1882,6 +1943,14 @@ ngx_sentinel_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
     }
     if (conf->ja4_list.nelts == 0 && prev->ja4_list.nelts > 0) {
         conf->ja4_list = prev->ja4_list;
+    }
+
+    /* Inherit JA4T source + deny list from parent if not set locally. */
+    if (conf->ja4t_source == NULL) {
+        conf->ja4t_source = prev->ja4t_source;
+    }
+    if (conf->ja4t_list.nelts == 0 && prev->ja4t_list.nelts > 0) {
+        conf->ja4t_list = prev->ja4t_list;
     }
 
     ngx_conf_merge_value(conf->weights.crowdsec,
@@ -3088,6 +3157,82 @@ sentinel_conf_ja4_deny(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
         }
 
         slot = ngx_array_push(&lcf->ja4_list);
+        if (slot == NULL) {
+            return NGX_CONF_ERROR;
+        }
+
+        *slot = value[i];
+    }
+
+    return NGX_CONF_OK;
+}
+
+
+/* ----------------------------------------------------------------------
+ * sentinel_ja4t <variable>;  — compile the operator-supplied PROXY-protocol
+ *                              TLV source (e.g. $proxy_protocol_tlv_0xe0) into
+ *                              a complex value (evaluated per request).
+ * sentinel_ja4t_deny <ja4t|hash> [...];  — denied JA4T (TCP) fingerprint list.
+ * ---------------------------------------------------------------------- */
+
+static char *
+sentinel_conf_ja4t_source(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
+{
+    ngx_sentinel_loc_conf_t           *lcf = conf;
+    ngx_str_t                         *value;
+    ngx_http_compile_complex_value_t   ccv;
+
+    if (lcf->ja4t_source != NULL) {
+        return "is duplicate";
+    }
+
+    value = cf->args->elts;
+
+    lcf->ja4t_source = ngx_palloc(cf->pool, sizeof(ngx_http_complex_value_t));
+    if (lcf->ja4t_source == NULL) {
+        return NGX_CONF_ERROR;
+    }
+
+    ngx_memzero(&ccv, sizeof(ngx_http_compile_complex_value_t));
+    ccv.cf = cf;
+    ccv.value = &value[1];
+    ccv.complex_value = lcf->ja4t_source;
+
+    if (ngx_http_compile_complex_value(&ccv) != NGX_OK) {
+        return NGX_CONF_ERROR;
+    }
+
+    return NGX_CONF_OK;
+}
+
+
+static char *
+sentinel_conf_ja4t_deny(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
+{
+    ngx_sentinel_loc_conf_t  *lcf = conf;
+    ngx_str_t                *value;
+    ngx_str_t                *slot;
+    ngx_uint_t                i;
+
+    value = cf->args->elts;
+
+    for (i = 1; i < cf->args->nelts; i++) {
+
+        if (value[i].len == 0) {
+            ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                               "sentinel_ja4t_deny: empty fingerprint");
+            return NGX_CONF_ERROR;
+        }
+
+        if (lcf->ja4t_list.elts == NULL) {
+            if (ngx_array_init(&lcf->ja4t_list, cf->pool, 8,
+                               sizeof(ngx_str_t)) != NGX_OK)
+            {
+                return NGX_CONF_ERROR;
+            }
+        }
+
+        slot = ngx_array_push(&lcf->ja4t_list);
         if (slot == NULL) {
             return NGX_CONF_ERROR;
         }

@@ -53,6 +53,7 @@ non-negative integer.
 | `sentinel_weight_velocity N;` | `30` | Added once when the request rate for this identity exceeds the configured threshold in the velocity zone. |
 | `sentinel_weight_asn N;` | `35` | Added once when the client's ASN (read from an operator-supplied geoip2 variable) matches the flagged datacenter/abuse-ASN list (see `sentinel_asn`). |
 | `sentinel_weight_ja4 N;` | `50` | Added once when the client's JA4 TLS fingerprint (read from an operator-supplied ssl-fingerprint variable) matches the deny list (see `sentinel_ja4`). |
+| `sentinel_weight_ja4t N;` | `45` | Added once when the client's JA4T TCP fingerprint (read from an operator-supplied PROXY-protocol TLV variable) matches the deny list (see `sentinel_ja4t`). |
 | `sentinel_weight_coherence N;` | `40` | Added once when the User-Agent claims a mainstream browser but the request lacks a real browser's header shape (see *UA↔request-shape coherence* below). |
 
 ### Velocity signal (`sentinel_velocity_zone` + `sentinel_velocity`)
@@ -271,6 +272,54 @@ http {
 > **Fail-open:** if the ssl-fingerprint module is not loaded, the source
 > variable is unset, or the connection is non-TLS (empty value), the signal
 > contributes `0` — it never blocks on a missing fingerprint.
+
+### JA4T (TCP) fingerprint deny-list (location / server / http context)
+
+Flags requests whose **JA4T transport fingerprint** (SYN window size,
+TCP-options order, MSS) matches an operator deny list. JA4T fingerprints the
+client's TCP stack — a different layer from JA4 (TLS, the ClientHello) and JA4H
+(HTTP headers). A match sets `$sentinel_ja4t` to `1` and adds
+`sentinel_weight_ja4t` (default `45`) once.
+
+**The module does NOT compute JA4T and nginx has no core patch for it.** JA4T is
+produced **upstream** — typically an edge load balancer that fingerprints the
+TCP handshake and passes the result down in a **PROXY-protocol v2 custom TLV**.
+nginx exposes that TLV out of the box via the generic
+`$proxy_protocol_tlv_0xNN` variable (no patch). The operator maps it into
+sentinel via `sentinel_ja4t`; sentinel reads it per request and matches it
+(case-insensitive) against `sentinel_ja4t_deny`.
+
+| Directive | Default | Meaning |
+|-----------|---------|---------|
+| `sentinel_ja4t <variable>;` | — | The JA4T source variable (e.g. `$proxy_protocol_tlv_0xe0`). Empty/unset = signal off. An empty value (no PROXY protocol / no TLV) fails open (no flag). |
+| `sentinel_ja4t_deny <ja4t|hash> [...];` | — | One or more denied JA4T fingerprints (space-separated; repeatable; child inherits parent if not overridden). Matched case-insensitively. |
+| `sentinel_weight_ja4t N;` | `45` | Score added once on a JA4T deny-list match. |
+
+**Variable:** `$sentinel_ja4t` — `1` if the client's JA4T matched the deny list,
+`0` otherwise.
+
+**Example** (edge LB emits JA4T in PROXY-protocol TLV type `0xe0`):
+
+```nginx
+http {
+    server {
+        listen 443 ssl proxy_protocol;      # accept PROXY protocol from the LB
+
+        sentinel_ja4t $proxy_protocol_tlv_0xe0;
+        sentinel_ja4t_deny t13d1516h2_8daaf6152771_b186095e22b6
+                           t13d1715h2_5b57614c22b0_3d5424432f57;
+
+        location / {
+            sentinel on;
+            sentinel_mode enforce;
+        }
+    }
+}
+```
+
+> **Fail-open:** if no PROXY protocol is configured, the TLV is absent, or the
+> source variable is unset (empty value), the signal contributes `0` — it never
+> blocks on a missing fingerprint. No edge LB / no JA4T TLV ⇒ signal simply off.
 
 ### UA↔request-shape coherence
 
@@ -734,6 +783,7 @@ values computed in the `PREACCESS` phase.
 | `$sentinel_velocity` | `0`/`1` | Per-identity request rate exceeded |
 | `$sentinel_asn` | `0`/`1` | Client ASN in the flagged datacenter/abuse list |
 | `$sentinel_ja4` | `0`/`1` | Client JA4 (TLS) fingerprint on the deny list |
+| `$sentinel_ja4t` | `0`/`1` | Client JA4T (TCP) fingerprint on the deny list |
 | `$sentinel_coherence` | `0`/`1` | UA claims a browser the request shape contradicts |
 | `$sentinel_fcrdns` | token | `verified` / `spoofed` / `pending` (forward-confirmed reverse-DNS verdict) |
 | `$sentinel_allowlist` | `0`/`1` | Client IP in a trusted CIDR |
@@ -753,7 +803,7 @@ log_format sentinel_decision escape=json
     '"scanner":$sentinel_scanner,"bot":$sentinel_bot,'
     '"header_anomaly":$sentinel_header_anomaly,"honeypot":$sentinel_honeypot,'
     '"velocity":$sentinel_velocity,"asn":$sentinel_asn,'
-    '"ja4":$sentinel_ja4,"coherence":$sentinel_coherence,'
+    '"ja4":$sentinel_ja4,"ja4t":$sentinel_ja4t,"coherence":$sentinel_coherence,'
     '"fcrdns":"$sentinel_fcrdns",'
     '"allowlist":$sentinel_allowlist,'
     '"crowdsec":$sentinel_crowdsec,"crowdsec_action":"$sentinel_crowdsec_action",'
