@@ -52,6 +52,8 @@ static char *ngx_sentinel_set_crowdsec_feed(ngx_conf_t *cf,
     ngx_command_t *cmd, void *conf);
 static char *ngx_sentinel_set_redis(ngx_conf_t *cf,
     ngx_command_t *cmd, void *conf);
+static char *ngx_sentinel_set_cs_sink(ngx_conf_t *cf,
+    ngx_command_t *cmd, void *conf);
 static char *ngx_sentinel_set_fcrdns_zone(ngx_conf_t *cf,
     ngx_command_t *cmd, void *conf);
 static char *ngx_sentinel_set_fcrdns(ngx_conf_t *cf,
@@ -523,6 +525,40 @@ static ngx_command_t ngx_sentinel_commands[] = {
       ngx_conf_set_num_slot,
       NGX_HTTP_LOC_CONF_OFFSET,
       offsetof(ngx_sentinel_loc_conf_t, weights.crowdsec),
+      NULL },
+
+    /* sentinel_cs_sink_path <file>; — export local bans as a CrowdSec
+     * file-acquisition decisions file (out-of-band, no network). */
+    { ngx_string("sentinel_cs_sink_path"),
+      NGX_HTTP_MAIN_CONF | NGX_HTTP_SRV_CONF | NGX_HTTP_LOC_CONF | NGX_CONF_TAKE1,
+      ngx_sentinel_set_cs_sink,
+      NGX_HTTP_LOC_CONF_OFFSET,
+      0,
+      NULL },
+
+    /* sentinel_cs_sink_interval time; — drain/rewrite tick (default 10s) */
+    { ngx_string("sentinel_cs_sink_interval"),
+      NGX_HTTP_MAIN_CONF | NGX_HTTP_SRV_CONF | NGX_HTTP_LOC_CONF | NGX_CONF_TAKE1,
+      ngx_conf_set_sec_slot,
+      NGX_HTTP_LOC_CONF_OFFSET,
+      offsetof(ngx_sentinel_loc_conf_t, cs_sink_interval),
+      NULL },
+
+    /* sentinel_cs_sink_ttl time; — decision duration written (default 3600s) */
+    { ngx_string("sentinel_cs_sink_ttl"),
+      NGX_HTTP_MAIN_CONF | NGX_HTTP_SRV_CONF | NGX_HTTP_LOC_CONF | NGX_CONF_TAKE1,
+      ngx_conf_set_sec_slot,
+      NGX_HTTP_LOC_CONF_OFFSET,
+      offsetof(ngx_sentinel_loc_conf_t, cs_sink_ttl),
+      NULL },
+
+    /* sentinel_cs_sink_scenario <s>; — "scenario" field (default
+     * sentinel/http-abuse) */
+    { ngx_string("sentinel_cs_sink_scenario"),
+      NGX_HTTP_MAIN_CONF | NGX_HTTP_SRV_CONF | NGX_HTTP_LOC_CONF | NGX_CONF_TAKE1,
+      ngx_conf_set_str_slot,
+      NGX_HTTP_LOC_CONF_OFFSET,
+      offsetof(ngx_sentinel_loc_conf_t, cs_sink_scenario),
       NULL },
 
     /* sentinel_status; — install the Prometheus exposition content handler on
@@ -1334,6 +1370,21 @@ ngx_sentinel_preaccess_handler(ngx_http_request_t *r)
                                        ngx_time() + (time_t) lcf->redis_ttl);
         }
 
+        /*
+         * CrowdSec decision sink: export this LOCALLY-ORIGINATED ban to the
+         * decisions file so the rest of a CrowdSec deployment learns about it.
+         * Same ban-loop guard as the Redis push (never re-export an externally
+         * sourced ban). Non-blocking enqueue; the worker timer writes the file.
+         * Fail-open (no-op if the sink is off).
+         */
+        if (lcf->cs_sink_path.len > 0 && !ctx->inputs.crowdsec_hit
+            && r->connection->addr_text.len != 0)
+        {
+            sentinel_cssink_enqueue_ban(lcf, &r->connection->addr_text,
+                                        NGX_SENTINEL_CS_BAN,
+                                        ngx_time() + (time_t) lcf->cs_sink_ttl);
+        }
+
         /* 444 -> drop the connection without a response; else finalize with
          * the configured HTTP status (default 403). */
         return lcf->block_status;
@@ -1597,6 +1648,11 @@ ngx_sentinel_create_loc_conf(ngx_conf_t *cf)
     lcf->redis_interval  = NGX_CONF_UNSET;
     lcf->redis_ttl       = NGX_CONF_UNSET;
 
+    /* cs_sink_path/scenario empty via pcalloc; cs_sink_zone NULL.
+     * sink enabled iff sentinel_cs_sink_path sets cs_sink_path. */
+    lcf->cs_sink_interval = NGX_CONF_UNSET;
+    lcf->cs_sink_ttl      = NGX_CONF_UNSET;
+
     lcf->tarpit_max_conns    = NGX_CONF_UNSET;
     lcf->tarpit_delay        = NGX_CONF_UNSET;
     lcf->tarpit_bytes        = NGX_CONF_UNSET;
@@ -1855,6 +1911,33 @@ ngx_sentinel_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
                                "sentinel_redis_ttl must be %d..%d s",
                                NGX_SENTINEL_REDIS_MIN_TTL,
                                NGX_SENTINEL_REDIS_MAX_TTL);
+            return NGX_CONF_ERROR;
+        }
+    }
+
+    /* CrowdSec decision sink. */
+    if (conf->cs_sink_path.len == 0) {
+        conf->cs_sink_path = prev->cs_sink_path;
+        if (conf->cs_sink_zone == NULL) {
+            conf->cs_sink_zone = prev->cs_sink_zone;
+        }
+    }
+    ngx_conf_merge_value(conf->cs_sink_interval, prev->cs_sink_interval,
+                         NGX_SENTINEL_CSSINK_INTERVAL);
+    ngx_conf_merge_value(conf->cs_sink_ttl, prev->cs_sink_ttl,
+                         NGX_SENTINEL_CSSINK_TTL);
+    ngx_conf_merge_str_value(conf->cs_sink_scenario, prev->cs_sink_scenario,
+                             NGX_SENTINEL_CSSINK_SCENARIO);
+
+    if (conf->cs_sink_path.len > 0) {
+        if (conf->cs_sink_interval < 1 || conf->cs_sink_interval > 3600) {
+            ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                               "sentinel_cs_sink_interval must be 1..3600 s");
+            return NGX_CONF_ERROR;
+        }
+        if (conf->cs_sink_ttl < 60 || conf->cs_sink_ttl > 86400) {
+            ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                               "sentinel_cs_sink_ttl must be 60..86400 s");
             return NGX_CONF_ERROR;
         }
     }
@@ -2483,6 +2566,63 @@ ngx_sentinel_set_redis(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
     return NGX_CONF_OK;
 }
 
+
+/* sentinel_cs_sink_path <file>; — enable the CrowdSec decision sink and declare
+ * its dedicated ring shm zone (one per distinct path). */
+static char *
+ngx_sentinel_set_cs_sink(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
+{
+    ngx_sentinel_loc_conf_t  *lcf = conf;
+    ngx_str_t                *value;
+    ngx_str_t                 zname;
+    ngx_shm_zone_t           *shm;
+    size_t                    zsize;
+
+    value = cf->args->elts;
+
+    if (lcf->cs_sink_path.len > 0) {
+        return "is duplicate";
+    }
+    if (value[1].len == 0) {
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                           "sentinel_cs_sink_path must be non-empty");
+        return NGX_CONF_ERROR;
+    }
+
+    /* NUL-terminate the path for ngx_open_file/ngx_rename_file. */
+    lcf->cs_sink_path.data = ngx_pnalloc(cf->pool, value[1].len + 1);
+    if (lcf->cs_sink_path.data == NULL) {
+        return NGX_CONF_ERROR;
+    }
+    ngx_memcpy(lcf->cs_sink_path.data, value[1].data, value[1].len);
+    lcf->cs_sink_path.data[value[1].len] = '\0';
+    lcf->cs_sink_path.len = value[1].len;
+
+    /* Dedicated sink-ring shm zone, keyed on the path so two distinct sink
+     * files get distinct rings (identical paths across locations share one). */
+    zname.len  = sizeof("sentinel_cs_sink_") - 1 + value[1].len;
+    zname.data = ngx_pnalloc(cf->pool, zname.len);
+    if (zname.data == NULL) {
+        return NGX_CONF_ERROR;
+    }
+    ngx_sprintf(zname.data, "sentinel_cs_sink_%V", &value[1]);
+
+    zsize = sizeof(ngx_sentinel_cssink_shctx_t) + 4 * ngx_pagesize;
+    zsize = ngx_align(zsize, ngx_pagesize);
+
+    shm = ngx_shared_memory_add(cf, &zname, zsize, &ngx_http_sentinel_module);
+    if (shm == NULL) {
+        return NGX_CONF_ERROR;
+    }
+    shm->init = sentinel_cssink_init_zone;
+    shm->data = NULL;
+
+    lcf->cs_sink_zone = shm;
+
+    return NGX_CONF_OK;
+}
+
+
 static char *
 ngx_sentinel_set_mode(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 {
@@ -2902,5 +3042,12 @@ ngx_sentinel_init_process(ngx_cycle_t *cycle)
     }
 
     /* Redis multi-box: arm the per-worker async sync timer. Fail-open. */
-    return sentinel_redis_init_process(cycle);
+    rc = sentinel_redis_init_process(cycle);
+    if (rc != NGX_OK) {
+        return rc;
+    }
+
+    /* CrowdSec decision sink: arm the per-worker drain/rewrite timer.
+     * Fail-open. */
+    return sentinel_cssink_init_process(cycle);
 }

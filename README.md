@@ -551,6 +551,51 @@ http {
 > (`Depends: libhiredis*` on the packaged build). Reference a password via an
 > nginx variable / env-templated config — never hard-code it.
 
+### CrowdSec decision feedback (out-of-band)
+
+The reverse of the CrowdSec feed: sentinel exports its **own** BLOCK decisions as
+a CrowdSec **file-acquisition decisions file**, so the rest of a CrowdSec
+deployment (`cscli`, other bouncers, the LAPI) learns about abuse that nginx
+detected locally. There is **no network in nginx** — the request path only
+enqueues the ban into a shared-memory ring; a worker timer atomically rewrites
+the file (write `.tmp`, rename) every interval. Only worker 0 owns the file.
+
+Only **locally-originated** bans are exported: a block driven by a CrowdSec hit
+(feed or Redis pull) is skipped — the same ban-loop guard the Redis push uses.
+
+```nginx
+location / {
+    sentinel on;
+    sentinel_mode enforce;
+    sentinel_cs_sink_path /var/lib/crowdsec/sentinel-decisions.json;
+    sentinel_cs_sink_ttl 4h;                       # decision duration
+    sentinel_cs_sink_scenario sentinel/http-abuse; # shows up in cscli
+}
+```
+
+The file is a stream of CrowdSec decision objects, one per line:
+
+```json
+{"value":"1.2.3.4","scope":"Ip","duration":"14400s","scenario":"sentinel/http-abuse","origin":"sentinel"}
+```
+
+Wire it into CrowdSec one of two ways:
+
+- **Import on a cron** — `cscli decisions import -i /var/lib/crowdsec/sentinel-decisions.json --format json`
+- **File acquisition** — point a CrowdSec acquisition at the file so the agent
+  ingests it continuously.
+
+| Directive | Default | Description |
+|---|---|---|
+| `sentinel_cs_sink_path <file>;` | — | Enable the sink and set the decisions file. The directory must be writable by the nginx worker. |
+| `sentinel_cs_sink_interval s;` | `10` | Drain/rewrite tick. Bounds: 1–3600 s. |
+| `sentinel_cs_sink_ttl s;` | `3600` | `duration` written for each decision. Bounds: 60–86400 s. |
+| `sentinel_cs_sink_scenario <s>;` | `sentinel/http-abuse` | The `scenario` field value. |
+
+> Fail-open: any filesystem error logs a warning and is skipped (the block
+> itself still fires). The ring drops on overflow (bounded). Decisions age out of
+> the file once their TTL elapses.
+
 ### Prometheus metrics (`sentinel_status`)
 
 `sentinel_status;` installs a content handler that emits aggregate counters in
