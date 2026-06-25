@@ -15,6 +15,7 @@
  *         + w_honeypot * honeypot
  *         + w_velocity * velocity_exceeded
  *         + w_asn      * datacenter_asn
+ *         + w_ja4      * ja4_flagged
  *         + w_coherence * ua_incoherent
  *         + w_crowdsec * crowdsec_hit (action-tiered: see below)
  *
@@ -144,6 +145,11 @@ sentinel_score_compute(const ngx_sentinel_inputs_t *inputs,
     /* datacenter_asn — request originates from a flagged datacenter/abuse ASN */
     if (inputs->datacenter_asn) {
         sentinel_score_add(&score, w->asn);
+    }
+
+    /* ja4_flagged — client JA4 (TLS) fingerprint on the operator deny list */
+    if (inputs->ja4_flagged) {
+        sentinel_score_add(&score, w->ja4);
     }
 
     /* ua_incoherent — UA claims a browser the request shape contradicts */
