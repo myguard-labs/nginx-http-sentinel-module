@@ -191,6 +191,31 @@ typedef struct {
 } ngx_sentinel_redis_shctx_t;
 
 /* -------------------------------------------------------------------------
+ * CrowdSec decision-feedback sink (sentinel_cssink.c)
+ * ---------------------------------------------------------------------- */
+
+/* Sink ring capacity (entries). Same model as the Redis push ring: request
+ * path drops on full (fail-open); the timer drains every interval. */
+#define NGX_SENTINEL_CSSINK_RING          4096
+
+/* Defaults for the sink directives. */
+#define NGX_SENTINEL_CSSINK_INTERVAL      10      /* drain/rewrite tick (s)     */
+#define NGX_SENTINEL_CSSINK_TTL           3600    /* decision duration (s)      */
+#define NGX_SENTINEL_CSSINK_SCENARIO      "sentinel/http-abuse"
+
+/* Reuses the Redis push entry shape (ip + action + expiry). */
+typedef ngx_sentinel_redis_push_t  ngx_sentinel_cssink_entry_t;
+
+/* Shared sink ring (one dedicated shm zone per sink path). head==tail => empty;
+ * guarded by its own shpool mutex. */
+typedef struct {
+    ngx_uint_t                    head;    /* next slot a worker writes */
+    ngx_uint_t                    tail;    /* next slot the timer drains */
+    ngx_uint_t                    dropped; /* overflow counter (telemetry) */
+    ngx_sentinel_cssink_entry_t   ring[NGX_SENTINEL_CSSINK_RING];
+} ngx_sentinel_cssink_shctx_t;
+
+/* -------------------------------------------------------------------------
  * Phase 2 — Tarpit constants
  * ---------------------------------------------------------------------- */
 
@@ -509,6 +534,19 @@ typedef struct {
     ngx_int_t                redis_interval; /* pull/flush tick (seconds)      */
     ngx_int_t                redis_ttl;      /* TTL for pushed ban keys (s)    */
     ngx_shm_zone_t          *redis_push_zone;/* dedicated push-ring shm zone   */
+
+    /* CrowdSec decision feedback (out-of-band, NO network in nginx). Enabled
+     * iff cs_sink_path is set (sentinel_cs_sink_path <file>;). On a BLOCK in
+     * enforce mode for a LOCALLY-ORIGINATED ban (!crowdsec_hit, same guard as
+     * the Redis push), the IP is enqueued to a dedicated shm ring; a worker
+     * timer drains it and atomically rewrites a CrowdSec file-acquisition JSON
+     * decisions file. The operator imports it (`cscli decisions import`) or
+     * points a CrowdSec file acquisition at it. Fail-open on any FS error. */
+    ngx_str_t                cs_sink_path;     /* decisions file (empty = off)  */
+    ngx_int_t                cs_sink_interval; /* drain/rewrite tick (seconds)  */
+    ngx_int_t                cs_sink_ttl;      /* decision duration written (s)  */
+    ngx_str_t                cs_sink_scenario; /* "scenario" field value         */
+    ngx_shm_zone_t          *cs_sink_zone;     /* dedicated sink-ring shm zone   */
 } ngx_sentinel_loc_conf_t;
 
 /* -------------------------------------------------------------------------
@@ -809,6 +847,11 @@ ngx_int_t sentinel_crowdsec_init_process(ngx_cycle_t *cycle);
 ngx_int_t sentinel_redis_init_zone(ngx_shm_zone_t *shm_zone, void *data);
 
 /*
+ * sentinel_cssink_init_zone — shm init callback for the sink-ring zone.
+ */
+ngx_int_t sentinel_cssink_init_zone(ngx_shm_zone_t *shm_zone, void *data);
+
+/*
  * sentinel_redis_init_process — arm the per-worker Redis sync timer for every
  * sentinel location that has `sentinel_redis` configured. Establishes the async
  * hiredis connection bound to nginx's event loop. Fail-open (returns NGX_OK on
@@ -825,6 +868,35 @@ ngx_int_t sentinel_redis_init_process(ngx_cycle_t *cycle);
  */
 void sentinel_redis_enqueue_ban(ngx_sentinel_loc_conf_t *lcf,
     ngx_str_t *ip, u_char action, time_t expiry);
+
+/* -------------------------------------------------------------------------
+ * CrowdSec decision-feedback sink (sentinel_cssink.c)
+ * ---------------------------------------------------------------------- */
+
+/*
+ * sentinel_cssink_init_process — arm the per-worker sink timer when any
+ * sentinel location has `sentinel_cs_sink_path` configured. Resolves the sink
+ * ring shm. Fail-open (returns NGX_OK on any setup error).
+ */
+ngx_int_t sentinel_cssink_init_process(ngx_cycle_t *cycle);
+
+/*
+ * sentinel_cssink_enqueue_ban — request-path hook: queue a LOCALLY-ORIGINATED
+ * ban (key=canonical client IP) into the sink ring for the next drain tick.
+ * Non-blocking, lock-bounded, drops on full (fail-open). No file I/O here.
+ * Called from the BLOCK enforcement path only when the sink is enabled and the
+ * ban did NOT originate from a CrowdSec hit (ban-loop guard upstream).
+ */
+void sentinel_cssink_enqueue_ban(ngx_sentinel_loc_conf_t *lcf,
+    ngx_str_t *ip, u_char action, time_t expiry);
+
+/*
+ * sentinel_cssink_format_decision — render one CrowdSec file-acquisition JSON
+ * decision line into buf (NUL not written; returns bytes written, or 0 on
+ * overflow/invalid input). Exposed for unit testing the format + escaping.
+ */
+size_t sentinel_cssink_format_decision(u_char *buf, size_t cap,
+    u_char *ip, size_t ip_len, const char *scenario, ngx_int_t duration_s);
 
 /* -------------------------------------------------------------------------
  * Prometheus metrics (sentinel_metrics.c)

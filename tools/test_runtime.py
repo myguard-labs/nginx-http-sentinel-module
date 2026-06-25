@@ -369,6 +369,21 @@ http {{
             sentinel_block_status 444;
         }}
 
+        # CrowdSec decision sink (TEST 22): a bot UA scores 100 -> BLOCK (403)
+        # AND, since the ban is locally-originated (no crowdsec_hit), the IP is
+        # enqueued to the sink ring; the worker-0 timer rewrites the decisions
+        # file every interval. 1s interval so the test sees it quickly.
+        location = /cs-sink {{
+            sentinel on;
+            sentinel_mode enforce;
+            sentinel_threshold challenge=90 tarpit=95 block=99;
+            sentinel_weight_bot 100;
+            sentinel_cs_sink_path {root}/logs/cs-sink.json;
+            sentinel_cs_sink_interval 1;
+            sentinel_cs_sink_ttl 3600;
+            sentinel_cs_sink_scenario sentinel/http-abuse;
+        }}
+
         # Prometheus metrics (TEST 21): the status endpoint itself runs no
         # sentinel evaluation (no `sentinel on`) - it only scrapes the shm
         # counters that the other enforce/shadow locations populated. Counters
@@ -556,7 +571,7 @@ class Nginx:
         # CONTENT phase so PREACCESS — and the sentinel handler — runs).
         for name in ("tarpit", "tarpit-life", "tarpit-maze", "tarpit-shadow", "cs",
                      "block", "block-close", "block-shadow", "block-ttl",
-                     "route-strict", "route-lax", "pow",
+                     "route-strict", "route-lax", "pow", "cs-sink",
                      "redis-block", "redis-pull"):
             (html / name).write_text("ok\n", encoding="ascii")
         # PoW bypass target (served in CONTENT phase once challenge passes).
@@ -1229,6 +1244,48 @@ def test_metrics_status(port: int) -> None:
           f"block={block_v}, bot={bot_s})")
 
 
+def test_cs_sink(port: int, root: pathlib.Path) -> None:
+    """TEST 22 - CrowdSec decision sink.
+
+    A bot UA on /cs-sink lands in the BLOCK band (403). Because the ban is
+    locally-originated (no crowdsec_hit), the IP is enqueued to the sink ring;
+    the worker-0 timer (1s interval) rewrites the decisions file. Assert the
+    file appears and contains a CrowdSec file-acquisition JSON line for our IP
+    with the configured scenario, scope Ip, and origin sentinel.
+    """
+    req = urllib.request.Request(
+        f"http://127.0.0.1:{port}/cs-sink",
+        headers={"Connection": "close", "User-Agent": BOT_UA})
+    try:
+        with urllib.request.urlopen(req, timeout=20):
+            pass
+    except urllib.error.HTTPError as e:
+        if e.code != 403:
+            raise AssertionError(
+                f"TEST 22 cs-sink: expected 403 on bot /cs-sink; got {e.code}")
+
+    sink = root / "logs" / "cs-sink.json"
+    deadline = time.time() + 8
+    content = ""
+    while time.time() < deadline:
+        if sink.exists():
+            content = sink.read_text(encoding="ascii", errors="replace")
+            if '"value":"127.0.0.1"' in content:
+                break
+        time.sleep(0.5)
+
+    if '"value":"127.0.0.1"' not in content:
+        raise AssertionError(
+            f"TEST 22 cs-sink: decisions file missing our IP; got:\n{content!r}")
+    for needle in ('"scope":"Ip"', '"scenario":"sentinel/http-abuse"',
+                   '"origin":"sentinel"', '"duration":"'):
+        if needle not in content:
+            raise AssertionError(
+                f"TEST 22 cs-sink: decisions line missing {needle!r}; "
+                f"got:\n{content!r}")
+    print("  TEST 22 cs-sink: PASS (decisions file written w/ IP + scenario)")
+
+
 def test_pow_challenge(port: int) -> None:
     """TEST 18 - PoW challenge.
 
@@ -1841,6 +1898,9 @@ def main() -> int:
 
             # TEST 21 - Prometheus metrics exposition (/sentinel-status).
             test_metrics_status(args.port + 1)
+
+            # TEST 22 - CrowdSec decision sink (local ban -> decisions file).
+            test_cs_sink(args.port + 1, root2 / "server")
 
             nginx2.stop()
             nginx2.assert_clean_logs()
