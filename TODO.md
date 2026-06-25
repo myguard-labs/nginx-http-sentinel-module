@@ -56,7 +56,26 @@ Out-of-band sync; request path untouched.
 
 ## Phase 4 — JA4 (TLS) + JA4T (patch-bearing, defer) `PR #4`
 Only if traffic shows JA4H/H2 evasion. Both need core surface beyond pure HTTP.
-- [ ] `[opus-low]` JA4 (TLS ClientHello): apply `ssl-fingerprint/patches/nginx-1.29.3+.patch` to build (SSL_CTX_set_client_hello_cb + ngx_ssl_connection_s fields); port JA4 byte-parse (`ngx_ssl_fingerprint_ja3`/ja4 fns) into `sentinel_ja4.c` → `$sentinel_ja4` → score. Patch must rebase per nginx release.
+- [ ] `[opus-low]` **JA4 (TLS) — UNBLOCKED 2026-06-25, NO core patch needed (build-ready, ASN-pattern).**
+      The workspace ALREADY ships the core surface: `libnginx-mod-ssl-fingerprint`
+      is built + enabled (deb/nginx/debian/rules:188,453; control:1347) with the
+      `ssl-fingerprint.patch` (nginx + angie) + the openssl-nginx
+      `openssl-4.0.0-ssl-fingerprint.patch` (`SSL_client_hello_get0_received_ext`
+      accessor). It exposes `$ssl_fingerprint_ja3{,_hash}` / `$ssl_fingerprint_ja4{,_o,_hash}`
+      after `ssl_fingerprint on;`. So sentinel does NOT apply a patch or link
+      openssl — it READS the var, exactly like the ASN signal reads `$geoip2_asn`:
+      - `sentinel_ja4 $ssl_fingerprint_ja4;` (complex value, mirror sentinel_asn.c)
+        + `sentinel_ja4_deny <ja4|hash>...;` blocklist → `inputs->ja4_flagged`
+        → `w_ja4` (new weight, def ~50). New `src/sentinel_ja4sig.c` (distinct from
+        the existing in-module JA4**H** `sentinel_ja4h.c` — this is JA4 **TLS**),
+        `$sentinel_ja4` var + log/JSON field. Pure per-request read, fail-open
+        (module not loaded / var unset / empty list). NO malloc/regex/net.
+      - Runtime test: map a JA4 from a request header (like the ASN test's
+        `$test_asn`), assert flagged delta ≥ w_ja4. Unit: struct mirror + 3 cases.
+      - ~ same size + shape as PR #20 (ASN). Build it next grind.
+      OLD plan (obsolete): "apply ssl-fingerprint patch + port byte-parse into
+        sentinel_ja4.c" — unnecessary, the module already does the ClientHello
+        parse and gives the var.
 - [ ] `[opus-low]` JA4T: proxy_protocol v2 TLV → JA4T var → score.
 
 ## Roadmap (post-core, incremental — layered on the score-then-act pipeline)
