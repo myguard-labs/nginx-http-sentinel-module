@@ -159,6 +159,15 @@ http {{
         default "";
         "~^[0-9]+$" $http_x_test_asn;
     }}
+
+    # TEST 23 (JA4-TLS signal): synthesize an ssl-fingerprint JA4 variable from a
+    # test header so the suite exercises sentinel_ja4's complex-value read +
+    # deny-list match WITHOUT a TLS handshake / ssl-fingerprint build dependency.
+    # In production the operator maps $ssl_fingerprint_ja4 here instead.
+    map $http_x_test_ja4 $test_ja4 {{
+        default "";
+        "~." $http_x_test_ja4;
+    }}
 {cs_zone}{redis_zone}
 
     server {{
@@ -475,6 +484,22 @@ http {{
             sentinel_datacenter_asn 16509 14618 15169;
             access_log {root}/logs/asn.log sentinelvars;
             return 200 "asn";
+        }}
+
+        # TEST 23 (JA4-TLS signal): shadow mode. The first JA4 below is on the
+        # deny list; a different JA4 is not. weight_bot/velocity zeroed so the
+        # delta is purely the JA4 term (default w_ja4 50). Client controls the
+        # JA4 via X-Test-JA4, fed through $test_ja4 into sentinel_ja4. Case-
+        # insensitive match: deny entry is upper-case, request sends lower-case.
+        location = /ja4 {{
+            sentinel on;
+            sentinel_mode shadow;
+            sentinel_weight_bot 0;
+            sentinel_weight_velocity 0;
+            sentinel_ja4 $test_ja4;
+            sentinel_ja4_deny T13D1516H2_8DAAF6152771_B186095E22B6;
+            access_log {root}/logs/ja4.log sentinelvars;
+            return 200 "ja4";
         }}
 
         # TEST 16 (coherence signal): shadow mode. weight_bot/velocity zeroed so
@@ -1739,6 +1764,42 @@ def main() -> int:
                     f"by >= 35 (w_asn); got hit={asn_hit} miss={asn_miss}")
             print(f"  TEST 15 asn: PASS "
                   f"(hit={asn_hit}, miss={asn_miss}, none={asn_none})")
+
+            # TEST 23: JA4-TLS signal. A request carrying X-Test-JA4 = the denied
+            # fingerprint (lower-case; deny list is upper-case -> exercises the
+            # case-insensitive match) must score >= w_ja4 (50); a different JA4
+            # and a request with no JA4 header must both score 0. weight_bot/
+            # velocity are zeroed in /ja4, so the score IS the JA4 term.
+            denied_ja4 = "t13d1516h2_8daaf6152771_b186095e22b6"
+            fetch(args.port, "/ja4", extra_headers={"X-Test-JA4": denied_ja4})
+            fetch(args.port, "/ja4", extra_headers={"X-Test-JA4": "t13d0000h1_deadbeefcafe_000000000000"})
+            fetch(args.port, "/ja4")
+            time.sleep(0.3)
+
+            ja4_log = root / "server" / "logs" / "ja4.log"
+            if not ja4_log.exists():
+                raise AssertionError("ja4.log not written")
+            jlines = [ln.split() for ln in
+                      ja4_log.read_text(encoding="utf-8").splitlines()
+                      if ln.strip()]
+            if len(jlines) < 3:
+                raise AssertionError(
+                    f"ja4.log: expected >= 3 lines, got {len(jlines)}")
+            ja4_hit  = int(jlines[0][1])   # denied fp -> flagged
+            ja4_miss = int(jlines[1][1])   # other fp  -> not flagged
+            ja4_none = int(jlines[2][1])   # no header -> empty -> off
+            # Shared 127.0.0.1 identity carries accumulated errrate, so assert
+            # the flagged DELTA (>= w_ja4 50); miss and none must be EQUAL.
+            if ja4_miss != ja4_none:
+                raise AssertionError(
+                    f"TEST 23 ja4: unflagged and missing JA4 must score equally; "
+                    f"got miss={ja4_miss} none={ja4_none}")
+            if ja4_hit - ja4_miss < 50:
+                raise AssertionError(
+                    f"TEST 23 ja4: denied JA4 must exceed control by >= 50 "
+                    f"(w_ja4); got hit={ja4_hit} miss={ja4_miss}")
+            print(f"  TEST 23 ja4: PASS "
+                  f"(hit={ja4_hit}, miss={ja4_miss}, none={ja4_none})")
 
             # TEST 16: coherence signal. A browser-claiming UA with a bare
             # request (no Accept / Accept-Language / gzip) is incoherent and must

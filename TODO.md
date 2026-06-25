@@ -56,7 +56,7 @@ Out-of-band sync; request path untouched.
 
 ## Phase 4 — JA4 (TLS) + JA4T (patch-bearing, defer) `PR #4`
 Only if traffic shows JA4H/H2 evasion. Both need core surface beyond pure HTTP.
-- [ ] `[opus-low]` **JA4 (TLS) — UNBLOCKED 2026-06-25, NO core patch needed (build-ready, ASN-pattern).**
+- [x] `[opus-low]` **JA4 (TLS) — DONE (PR, master 2026-06-25). `sentinel_ja4 $ssl_fingerprint_ja4;` + `sentinel_ja4_deny <ja4|hash>...;` → w_ja4 50, `$sentinel_ja4` var + JSON/log field. New src/sentinel_ja4sig.c (ASN-pattern, case-insensitive match, no openssl link). Runtime TEST 23, unit +3.**
       The workspace ALREADY ships the core surface: `libnginx-mod-ssl-fingerprint`
       is built + enabled (deb/nginx/debian/rules:188,453; control:1347) with the
       `ssl-fingerprint.patch` (nginx + angie) + the openssl-nginx

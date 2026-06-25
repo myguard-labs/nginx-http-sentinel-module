@@ -52,6 +52,7 @@ non-negative integer.
 | `sentinel_weight_honeypot N;` | `90` | Added once when the request URI matches a configured decoy-path prefix (see `sentinel_honeypot`). |
 | `sentinel_weight_velocity N;` | `30` | Added once when the request rate for this identity exceeds the configured threshold in the velocity zone. |
 | `sentinel_weight_asn N;` | `35` | Added once when the client's ASN (read from an operator-supplied geoip2 variable) matches the flagged datacenter/abuse-ASN list (see `sentinel_asn`). |
+| `sentinel_weight_ja4 N;` | `50` | Added once when the client's JA4 TLS fingerprint (read from an operator-supplied ssl-fingerprint variable) matches the deny list (see `sentinel_ja4`). |
 | `sentinel_weight_coherence N;` | `40` | Added once when the User-Agent claims a mainstream browser but the request lacks a real browser's header shape (see *UA↔request-shape coherence* below). |
 
 ### Velocity signal (`sentinel_velocity_zone` + `sentinel_velocity`)
@@ -222,6 +223,54 @@ http {
 > **Fail-open:** if the geoip2 module is not loaded, the source variable is
 > unset, or the IP is not in the DB (empty value), the signal contributes `0` —
 > it never blocks on a missing lookup.
+
+### JA4 (TLS) fingerprint deny-list (location / server / http context)
+
+Flags requests whose **JA4 TLS fingerprint** (computed from the ClientHello)
+matches an operator deny list of known-bad fingerprints — bot frameworks,
+scrapers and scanners that present a distinctive, stable TLS stack. A match sets
+`$sentinel_ja4` to `1` and adds `sentinel_weight_ja4` (default `50`) once.
+
+This is JA4 **TLS** — distinct from the module's own in-HTTP JA4**H**
+(`$sentinel_ja4h`, computed from request headers). **The module does NOT link
+openssl or parse the ClientHello.** The TLS fingerprint is produced by the
+separately-packaged ssl-fingerprint module (Debian:
+`libnginx-mod-ssl-fingerprint`), which exposes `$ssl_fingerprint_ja4` (and
+`_hash`, `_o`, `$ssl_fingerprint_ja3{,_hash}`) after `ssl_fingerprint on;`. The
+operator maps that variable into sentinel via `sentinel_ja4`; sentinel reads it
+per request and matches it (case-insensitive) against `sentinel_ja4_deny`.
+
+| Directive | Default | Meaning |
+|-----------|---------|---------|
+| `sentinel_ja4 <variable>;` | — | The ssl-fingerprint JA4 source variable (e.g. `$ssl_fingerprint_ja4`). Empty/unset = signal off. An empty value (non-TLS / no ClientHello) fails open (no flag). |
+| `sentinel_ja4_deny <ja4|hash> [...];` | — | One or more denied JA4 fingerprints (raw JA4 string or hash — whichever the source variable emits; space-separated; repeatable; child inherits parent if not overridden). Matched case-insensitively. |
+
+**Variable:** `$sentinel_ja4` — `1` if the client's JA4 matched the deny list,
+`0` otherwise.
+
+**Example:**
+
+```nginx
+http {
+    server {
+        listen 443 ssl;
+        ssl_fingerprint on;                 # ssl-fingerprint module
+
+        sentinel_ja4 $ssl_fingerprint_ja4;
+        sentinel_ja4_deny t13d1516h2_8daaf6152771_b186095e22b6  # e.g. a scraper stack
+                          t13d1715h2_5b57614c22b0_3d5424432f57;
+
+        location / {
+            sentinel on;
+            sentinel_mode enforce;
+        }
+    }
+}
+```
+
+> **Fail-open:** if the ssl-fingerprint module is not loaded, the source
+> variable is unset, or the connection is non-TLS (empty value), the signal
+> contributes `0` — it never blocks on a missing fingerprint.
 
 ### UA↔request-shape coherence
 
@@ -684,6 +733,7 @@ values computed in the `PREACCESS` phase.
 | `$sentinel_honeypot` | `0`/`1` | URI matched a decoy-path prefix |
 | `$sentinel_velocity` | `0`/`1` | Per-identity request rate exceeded |
 | `$sentinel_asn` | `0`/`1` | Client ASN in the flagged datacenter/abuse list |
+| `$sentinel_ja4` | `0`/`1` | Client JA4 (TLS) fingerprint on the deny list |
 | `$sentinel_coherence` | `0`/`1` | UA claims a browser the request shape contradicts |
 | `$sentinel_fcrdns` | token | `verified` / `spoofed` / `pending` (forward-confirmed reverse-DNS verdict) |
 | `$sentinel_allowlist` | `0`/`1` | Client IP in a trusted CIDR |
@@ -703,7 +753,7 @@ log_format sentinel_decision escape=json
     '"scanner":$sentinel_scanner,"bot":$sentinel_bot,'
     '"header_anomaly":$sentinel_header_anomaly,"honeypot":$sentinel_honeypot,'
     '"velocity":$sentinel_velocity,"asn":$sentinel_asn,'
-    '"coherence":$sentinel_coherence,'
+    '"ja4":$sentinel_ja4,"coherence":$sentinel_coherence,'
     '"fcrdns":"$sentinel_fcrdns",'
     '"allowlist":$sentinel_allowlist,'
     '"crowdsec":$sentinel_crowdsec,"crowdsec_action":"$sentinel_crowdsec_action",'
