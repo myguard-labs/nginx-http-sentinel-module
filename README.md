@@ -168,6 +168,54 @@ http {
 
 ---
 
+### Blocking malware C2 with the abuse.ch SSLBL JA3 feed
+
+[abuse.ch SSLBL](https://sslbl.abuse.ch/blacklist/) publishes a curated list of
+JA3 TLS fingerprints belonging to known malware / botnet C2 clients. These are
+high-confidence: a real browser never matches one. The `ssl-fingerprint` module
+exposes the client's JA3 MD5 as `$ssl_fingerprint_ja3_hash`; `sentinel_ja3`
+scores a deny-list match at **+80** (default) — above the block threshold, so a
+C2 client is blocked on the first request.
+
+`tools/sslbl-ja3-fetch.sh` downloads the feed and generates an nginx include:
+
+```bash
+# Daily cron — only reload nginx when the feed actually changed (exit 10 = no change)
+0 4 * * *  /opt/.../tools/sslbl-ja3-fetch.sh -o /etc/nginx/sentinel-ja3-deny.conf \
+             && systemctl reload nginx
+```
+
+The generated `/etc/nginx/sentinel-ja3-deny.conf` is a single
+`sentinel_ja3_deny <hash> <hash> ...;` statement. Wire it up:
+
+```nginx
+http {
+    server {
+        listen 443 ssl;
+        ssl_fingerprint on;                       # libnginx-mod-ssl-fingerprint
+
+        sentinel on;
+        sentinel_mode enforce;
+        sentinel_zone main:10m;
+
+        sentinel_ja3 $ssl_fingerprint_ja3_hash;   # client's JA3 MD5
+        include /etc/nginx/sentinel-ja3-deny.conf; # SSLBL deny list (generated)
+        sentinel_weight_ja3 80;                    # SSLBL = malware/C2 → block band
+
+        location / {
+            root /var/www/html;
+        }
+    }
+}
+```
+
+A C2 client whose JA3 is on the SSLBL list scores 80 → block on the first hit.
+Everything else is unaffected (empty/missing JA3 fails open, contributes 0).
+
+> JA3 (MD5) is the older fingerprint; JA4 is its modern successor. They catch
+> different populations — JA3's value here is specifically the SSLBL malware
+> feed. Run both (`sentinel_ja3` + `sentinel_ja4`) for layered coverage.
+
 ### Full defense stack (CrowdSec + all signals)
 
 ```nginx
@@ -283,6 +331,7 @@ http {
     sentinel_weight_velocity  30;        # per-identity request rate exceeded
     sentinel_weight_asn       35;        # client ASN in the flagged list
     sentinel_weight_coherence 40;        # browser UA but bare HTTP client shape
+    sentinel_weight_ja3       80;        # JA3 (TLS) fp on deny list (SSLBL malware/C2)
     sentinel_weight_ja4       50;        # JA4 (TLS) fp on deny list
     sentinel_weight_ja4t      45;        # JA4T (TCP) fp on deny list
     sentinel_weight_crowdsec  100;       # CrowdSec ban table hit (action-tiered)
@@ -301,6 +350,13 @@ http {
     # Datacenter / abuse ASN (reads a geoip2 module variable — no DB in module)
     sentinel_asn $geoip2_asn;
     sentinel_datacenter_asn 16509 14618 15169 14061 16276;
+
+    # JA3 TLS fingerprint deny-list (reads ssl-fingerprint module variable)
+    # Pairs with the abuse.ch SSLBL malware/C2 JA3 feed (see below).
+    sentinel_ja3 $ssl_fingerprint_ja3_hash;
+    sentinel_ja3_deny e7d705a3286e19ea42f587b344ee6865;
+    # ... or generated from the SSLBL feed:
+    #   include /etc/nginx/sentinel-ja3-deny.conf;
 
     # JA4 TLS fingerprint deny-list (reads ssl-fingerprint module variable)
     sentinel_ja4 $ssl_fingerprint_ja4;
@@ -418,6 +474,7 @@ score = (weight_errrate × errrate_count)
       + (weight_velocity × 1_if_rate_exceeded)
       + (weight_asn      × 1_if_datacenter_asn)
       + (weight_coherence × 1_if_ua_incoherent)
+      + (weight_ja3      × 1_if_ja3_denied)
       + (weight_ja4      × 1_if_ja4_denied)
       + (weight_ja4t     × 1_if_ja4t_denied)
       + (weight_crowdsec × tier_factor × 1_if_crowdsec_hit)
@@ -459,6 +516,7 @@ Use `sentinel_honeypot` for anything else (custom decoys, `/xmlrpc.php`, `/actua
 | Velocity | `$sentinel_velocity` | 30 | Per-identity rate exceeded in velocity zone |
 | ASN | `$sentinel_asn` | 35 | Client ASN in `sentinel_datacenter_asn` list |
 | UA coherence | `$sentinel_coherence` | 40 | Browser UA + bare HTTP client headers |
+| JA3 (TLS) | `$sentinel_ja3` | 80 | TLS fingerprint on `sentinel_ja3_deny` list (abuse.ch SSLBL malware/C2) |
 | JA4 (TLS) | `$sentinel_ja4` | 50 | TLS fingerprint on `sentinel_ja4_deny` list |
 | JA4T (TCP) | `$sentinel_ja4t` | 45 | TCP fingerprint on `sentinel_ja4t_deny` list |
 | CrowdSec | `$sentinel_crowdsec` | 100 | IP in CrowdSec ban table |
@@ -484,6 +542,7 @@ All variables are `NOCACHEABLE` — they resolve to the value computed in PREACC
 | `$sentinel_velocity` | `0/1` | Velocity exceeded |
 | `$sentinel_asn` | `0/1` | Flagged ASN |
 | `$sentinel_coherence` | `0/1` | UA/header incoherence |
+| `$sentinel_ja3` | `0/1` | JA3 deny-list hit (SSLBL malware/C2) |
 | `$sentinel_ja4` | `0/1` | JA4 deny-list hit |
 | `$sentinel_ja4t` | `0/1` | JA4T deny-list hit |
 | `$sentinel_fcrdns` | `verified/spoofed/pending` | FCrDNS verdict |
@@ -574,7 +633,7 @@ location = /sentinel-status {
 |---|---|---|
 | `sentinel_requests_total` | counter | — |
 | `sentinel_verdict_total` | counter | `v=allow\|challenge\|tarpit\|block` |
-| `sentinel_signal_total` | counter | `s=errrate\|blocked\|scanner\|bot\|header\|honeypot\|velocity\|asn\|coherence\|crowdsec` |
+| `sentinel_signal_total` | counter | `s=errrate\|blocked\|scanner\|bot\|header\|honeypot\|velocity\|asn\|coherence\|crowdsec\|ja3\|ja4\|ja4t` |
 | `sentinel_shadow_total` | counter | — |
 | `sentinel_tarpit_active` | gauge | — |
 

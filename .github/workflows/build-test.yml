@@ -121,6 +121,7 @@ jobs:
               "$GITHUB_WORKSPACE/src/sentinel_tarpit.c" \
               "$GITHUB_WORKSPACE/src/sentinel_velocity.c" \
               "$GITHUB_WORKSPACE/src/sentinel_asn.c" \
+              "$GITHUB_WORKSPACE/src/sentinel_ja3sig.c" \
               "$GITHUB_WORKSPACE/src/sentinel_ja4sig.c" \
               "$GITHUB_WORKSPACE/src/sentinel_ja4tsig.c" \
               "$GITHUB_WORKSPACE/src/sentinel_coherence.c" \

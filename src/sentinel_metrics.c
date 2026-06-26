@@ -74,6 +74,9 @@ sentinel_metrics_record(ngx_sentinel_main_conf_t *mcf,
     if (in->datacenter_asn) {
         sentinel_metric_inc(mcf, NGX_SENTINEL_M_SIG_ASN);
     }
+    if (in->ja3_flagged) {
+        sentinel_metric_inc(mcf, NGX_SENTINEL_M_SIG_JA3);
+    }
     if (in->ja4_flagged) {
         sentinel_metric_inc(mcf, NGX_SENTINEL_M_SIG_JA4);
     }
@@ -118,6 +121,7 @@ static const struct {
     { NGX_SENTINEL_M_SIG_ASN,       "asn"       },
     { NGX_SENTINEL_M_SIG_COHERENCE, "coherence" },
     { NGX_SENTINEL_M_SIG_CROWDSEC,  "crowdsec"  },
+    { NGX_SENTINEL_M_SIG_JA3,       "ja3"       },
     { NGX_SENTINEL_M_SIG_JA4,       "ja4"       },
     { NGX_SENTINEL_M_SIG_JA4T,      "ja4t"      }
 };

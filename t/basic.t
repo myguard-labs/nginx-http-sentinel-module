@@ -175,6 +175,7 @@ sentinel_velocity: unknown velocity zone "nosuchzone"
     add_header X-Throttled $sentinel_throttled;
     add_header X-Shield    $sentinel_shield;
     add_header X-Asn       $sentinel_asn;
+    add_header X-Ja3       $sentinel_ja3;
     add_header X-Ja4       $sentinel_ja4;
     add_header X-Ja4t      $sentinel_ja4t;
     add_header X-Coherence $sentinel_coherence;
@@ -196,6 +197,7 @@ X-CsAction: none
 X-Throttled: 0
 X-Shield: 0
 X-Asn: 0
+X-Ja3: 0
 X-Ja4: 0
 X-Ja4t: 0
 X-Coherence: 0

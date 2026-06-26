@@ -55,6 +55,7 @@ typedef int            ngx_flag_t;
 #define NGX_SENTINEL_DEFAULT_W_VELOCITY 30
 #define NGX_SENTINEL_DEFAULT_W_ASN     35
 #define NGX_SENTINEL_DEFAULT_W_COHERENCE 40
+#define NGX_SENTINEL_DEFAULT_W_JA3     80
 #define NGX_SENTINEL_DEFAULT_W_JA4     50
 #define NGX_SENTINEL_DEFAULT_W_JA4T    45
 #define NGX_SENTINEL_DEFAULT_W_CROWDSEC 100
@@ -89,6 +90,7 @@ typedef struct {
     ngx_flag_t  velocity_exceeded;
     ngx_flag_t  datacenter_asn;
     ngx_flag_t  ua_incoherent;
+    ngx_flag_t  ja3_flagged;
     ngx_flag_t  ja4_flagged;
     ngx_flag_t  ja4t_flagged;
     ngx_flag_t  allowlisted;
@@ -112,6 +114,7 @@ typedef struct {
     ngx_int_t  velocity;
     ngx_int_t  asn;       /* added once if datacenter_asn   */
     ngx_int_t  coherence; /* added once if ua_incoherent    */
+    ngx_int_t  ja3;       /* added once if ja3_flagged       */
     ngx_int_t  ja4;       /* added once if ja4_flagged       */
     ngx_int_t  ja4t;      /* added once if ja4t_flagged      */
     ngx_int_t  crowdsec;
@@ -171,6 +174,7 @@ make_lcf(ngx_int_t w_errrate, ngx_int_t w_blocked,
     lcf.weights.velocity = 0;  /* caller sets explicitly when testing velocity */
     lcf.weights.asn      = 0;  /* caller sets explicitly when testing asn */
     lcf.weights.coherence = 0; /* caller sets explicitly when testing coherence */
+    lcf.weights.ja3      = 0;  /* caller sets explicitly when testing ja3 */
     lcf.weights.ja4      = 0;  /* caller sets explicitly when testing ja4 */
     lcf.weights.ja4t     = 0;  /* caller sets explicitly when testing ja4t */
     lcf.weights.crowdsec = NGX_SENTINEL_DEFAULT_W_CROWDSEC;
@@ -599,6 +603,33 @@ main(void)
     inp = make_inputs(0, 0, 0, 0, 0);
     inp.ja4_flagged = 0;
     ASSERT_EQ("ja4=0 → 0", sentinel_score_compute(&inp, &lcf), 0);
+
+    /* ------------------------------------------------------------------
+     * (h4a) JA3 (TLS) signal: inputs->ja3_flagged adds w_ja3 once.
+     * ------------------------------------------------------------------ */
+
+    /* ja3_flagged=1, weight=80 → score 80. */
+    lcf = make_lcf(0, 0, 0, 0);
+    lcf.weights.ja3 = NGX_SENTINEL_DEFAULT_W_JA3;
+    inp = make_inputs(0, 0, 0, 0, 0);
+    inp.ja3_flagged = 1;
+    ASSERT_EQ("ja3 only: 80",
+              sentinel_score_compute(&inp, &lcf), 80);
+
+    /* ja3 + bot combined: 80 + 30 = 110. */
+    lcf = make_lcf(0, 0, 0, NGX_SENTINEL_DEFAULT_W_BOT);
+    lcf.weights.ja3 = NGX_SENTINEL_DEFAULT_W_JA3;
+    inp = make_inputs(0, 0, 0, 1, 0);
+    inp.ja3_flagged = 1;
+    ASSERT_EQ("ja3 + bot: 80 + 30 = 110",
+              sentinel_score_compute(&inp, &lcf), 110);
+
+    /* ja3_flagged=0 → no contribution. */
+    lcf = make_lcf(0, 0, 0, 0);
+    lcf.weights.ja3 = NGX_SENTINEL_DEFAULT_W_JA3;
+    inp = make_inputs(0, 0, 0, 0, 0);
+    inp.ja3_flagged = 0;
+    ASSERT_EQ("ja3=0 → 0", sentinel_score_compute(&inp, &lcf), 0);
 
     /* ------------------------------------------------------------------
      * (h4b) JA4T (TCP) signal: inputs->ja4t_flagged adds w_ja4t once.
