@@ -76,26 +76,7 @@ Only if traffic shows JA4H/H2 evasion. Both need core surface beyond pure HTTP.
       OLD plan (obsolete): "apply ssl-fingerprint patch + port byte-parse into
         sentinel_ja4.c" — unnecessary, the module already does the ClientHello
         parse and gives the var.
-- [ ] `[opus]` **JA4T (TLS-transport / TCP fp) — GATED, needs a JA4T SOURCE VAR first (verified 2026-06-25, no source exists).**
-      Investigated: the ssl-fingerprint module exposes ONLY ja4/ja4_r/ja4_ro/ja4_o
-      (all ClientHello-derived). It does NOT and CANNOT produce JA4T — JA4T is a
-      TCP/transport fingerprint (SYN window size, TCP options order, MSS), a
-      DIFFERENT LAYER than the TLS ClientHello. Extending ssl-fingerprint's patch
-      will NOT yield it (wrong layer).
-      Two real source paths, both core surface + traffic-gated:
-      1. **proxy_protocol v2 TLV** — if an upstream LB (haproxy/edge) computes
-         JA4T and passes it in a PPv2 TLV, nginx must expose that TLV as a var
-         (core has `$proxy_protocol_tlv_0xNN` in recent versions — CHECK the
-         packaged nginx version supports custom TLV vars; if so this is the
-         no-patch path). Then sentinel reads it EXACTLY like sentinel_ja4sig.c:
-         `sentinel_ja4t $proxy_protocol_tlv_0xE0;` + `sentinel_ja4t_deny ...;`.
-      2. **core socket-opt patch** — read SO_* / TCP_INFO at accept, compute JA4T
-         in-core, expose `$tcp_ja4t`. Multi-file core patch (nginx + angie),
-         zero-fuzz refresh required. Heavy.
-      **Sentinel side is trivial once a var exists** — clone sentinel_ja4sig.c to
-      sentinel_ja4tsig.c (s/ja4/ja4t/, w_ja4t ~45), same ASN/JA4 pattern. The
-      whole cost is producing the source var. DO PATH 1 FIRST (check PPv2 TLV var
-      support) — only fall to path 2 if no LB/TLV is in the deployment.
+- [x] `[opus]` **JA4T (TCP) fingerprint deny-list signal — DONE (PR #29, master caffe5b 2026-06-26). Path 1 (PPv2-TLV) taken: nginx 1.31.2 already supports `$proxy_protocol_tlv_0xNN` (ngx_proxy_protocol_get_tlv hex-type branch, confirmed in source). New `src/sentinel_ja4tsig.c` (exact ASN/JA4 pattern clone). `sentinel_ja4t $proxy_protocol_tlv_0xe0;` + `sentinel_ja4t_deny ...;` → `inputs->ja4t_flagged` → w_ja4t 45. `$sentinel_ja4t` var + JSON/log field. Unit +3, basic.t X-Ja4t, runtime TEST 24 (map JA4T from X-Test-JA4T header; denied fp lower-case vs upper-case deny entry → case-insensitive; delta hit−miss = 45 = w_ja4t). No core patch, no malloc in request path, fail-open.**
 
 ## Roadmap (post-core, incremental — layered on the score-then-act pipeline)
 Each = own small PR. Full catalog + config examples: the pitch page (DESIGN.md links it).
