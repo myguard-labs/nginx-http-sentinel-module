@@ -58,6 +58,7 @@ typedef int            ngx_flag_t;
 #define NGX_SENTINEL_DEFAULT_W_JA3     80
 #define NGX_SENTINEL_DEFAULT_W_JA4     50
 #define NGX_SENTINEL_DEFAULT_W_JA4T    45
+#define NGX_SENTINEL_DEFAULT_W_C2IP    80
 #define NGX_SENTINEL_DEFAULT_W_CROWDSEC 100
 
 #define NGX_SENTINEL_CS_NONE      0
@@ -93,6 +94,7 @@ typedef struct {
     ngx_flag_t  ja3_flagged;
     ngx_flag_t  ja4_flagged;
     ngx_flag_t  ja4t_flagged;
+    ngx_flag_t  c2ip_flagged;
     ngx_flag_t  allowlisted;
     ngx_flag_t  crowdsec_hit;
     u_char      crowdsec_action;
@@ -117,6 +119,7 @@ typedef struct {
     ngx_int_t  ja3;       /* added once if ja3_flagged       */
     ngx_int_t  ja4;       /* added once if ja4_flagged       */
     ngx_int_t  ja4t;      /* added once if ja4t_flagged      */
+    ngx_int_t  c2ip;      /* added once if c2ip_flagged      */
     ngx_int_t  crowdsec;
 } ngx_sentinel_weights_t;
 
@@ -177,6 +180,7 @@ make_lcf(ngx_int_t w_errrate, ngx_int_t w_blocked,
     lcf.weights.ja3      = 0;  /* caller sets explicitly when testing ja3 */
     lcf.weights.ja4      = 0;  /* caller sets explicitly when testing ja4 */
     lcf.weights.ja4t     = 0;  /* caller sets explicitly when testing ja4t */
+    lcf.weights.c2ip     = 0;  /* caller sets explicitly when testing c2ip */
     lcf.weights.crowdsec = NGX_SENTINEL_DEFAULT_W_CROWDSEC;
     lcf.threshold.challenge = NGX_SENTINEL_DEFAULT_THRESH_CH;
     lcf.threshold.tarpit    = NGX_SENTINEL_DEFAULT_THRESH_TP;
@@ -657,6 +661,33 @@ main(void)
     inp = make_inputs(0, 0, 0, 0, 0);
     inp.ja4t_flagged = 0;
     ASSERT_EQ("ja4t=0 → 0", sentinel_score_compute(&inp, &lcf), 0);
+
+    /* ------------------------------------------------------------------
+     * (h4c) C2 IP signal: inputs->c2ip_flagged adds w_c2ip once.
+     * ------------------------------------------------------------------ */
+
+    /* c2ip_flagged=1, weight=80 → score 80. */
+    lcf = make_lcf(0, 0, 0, 0);
+    lcf.weights.c2ip = NGX_SENTINEL_DEFAULT_W_C2IP;
+    inp = make_inputs(0, 0, 0, 0, 0);
+    inp.c2ip_flagged = 1;
+    ASSERT_EQ("c2ip only: 80",
+              sentinel_score_compute(&inp, &lcf), 80);
+
+    /* c2ip + bot combined: 80 + 30 = 110. */
+    lcf = make_lcf(0, 0, 0, NGX_SENTINEL_DEFAULT_W_BOT);
+    lcf.weights.c2ip = NGX_SENTINEL_DEFAULT_W_C2IP;
+    inp = make_inputs(0, 0, 0, 1, 0);
+    inp.c2ip_flagged = 1;
+    ASSERT_EQ("c2ip + bot: 80 + 30 = 110",
+              sentinel_score_compute(&inp, &lcf), 110);
+
+    /* c2ip_flagged=0 → no contribution. */
+    lcf = make_lcf(0, 0, 0, 0);
+    lcf.weights.c2ip = NGX_SENTINEL_DEFAULT_W_C2IP;
+    inp = make_inputs(0, 0, 0, 0, 0);
+    inp.c2ip_flagged = 0;
+    ASSERT_EQ("c2ip=0 → 0", sentinel_score_compute(&inp, &lcf), 0);
 
     /* ------------------------------------------------------------------
      * (i) Allowlist short-circuit: allowlisted forces 0, but a CrowdSec ban

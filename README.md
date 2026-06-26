@@ -216,6 +216,55 @@ Everything else is unaffected (empty/missing JA3 fails open, contributes 0).
 > different populations — JA3's value here is specifically the SSLBL malware
 > feed. Run both (`sentinel_ja3` + `sentinel_ja4`) for layered coverage.
 
+### Blocking C2 infrastructure with the abuse.ch Feodo IP feed
+
+[abuse.ch Feodo Tracker](https://feodotracker.abuse.ch/blocklist/) publishes a
+curated list of IPv4 addresses of confirmed botnet command-and-control (C2)
+servers (Dridex, Emotet, TrickBot, QakBot, …). An inbound client whose IP *is*
+known C2 infrastructure is high-confidence malicious. Unlike the JA3 feed this
+matches on the **client IP** directly — no TLS, no `ssl-fingerprint`, works on
+plain HTTP too.
+
+The deny list is **static** (a daily feed), so it is compiled into a radix tree
+at config load and matched by longest prefix per request — no per-request
+allocation, no DB, no network. CIDRs are accepted (`sentinel_c2ip_deny
+1.2.3.0/24 2001:db8::/32`), so it is distinct from a dynamic CrowdSec ban table.
+
+`tools/feodo-c2ip-fetch.sh` downloads the feed and generates an nginx include:
+
+```bash
+# Daily cron — only reload nginx when the feed actually changed (exit 10 = no change)
+0 4 * * *  /opt/.../tools/feodo-c2ip-fetch.sh -o /etc/nginx/sentinel-c2ip-deny.conf \
+             && systemctl reload nginx
+```
+
+The generated file is a single `sentinel_c2ip_deny <ip> <ip> ...;` statement.
+Wire it up (no TLS required):
+
+```nginx
+http {
+    server {
+        listen 80;
+
+        sentinel on;
+        sentinel_mode enforce;
+        sentinel_zone main:10m;
+
+        include /etc/nginx/sentinel-c2ip-deny.conf; # Feodo C2 IP list (generated)
+        sentinel_weight_c2ip 80;                    # C2 infra → block band
+
+        location / {
+            root /var/www/html;
+        }
+    }
+}
+```
+
+A client whose IP is on the Feodo list scores 80 → block on the first request.
+Everything else is unaffected: a non-IP connection, an empty list, or an IP not
+in the tree all fail open and contribute 0. `$sentinel_c2ip` exposes the verdict
+(`0`/`1`) for logging.
+
 ### Full defense stack (CrowdSec + all signals)
 
 ```nginx
@@ -330,6 +379,7 @@ http {
     sentinel_weight_honeypot  90;        # operator-defined decoy path hit
     sentinel_weight_velocity  30;        # per-identity request rate exceeded
     sentinel_weight_asn       35;        # client ASN in the flagged list
+    sentinel_weight_c2ip      80;        # client IP on C2 deny list (Feodo C2 infra)
     sentinel_weight_coherence 40;        # browser UA but bare HTTP client shape
     sentinel_weight_ja3       80;        # JA3 (TLS) fp on deny list (SSLBL malware/C2)
     sentinel_weight_ja4       50;        # JA4 (TLS) fp on deny list
@@ -350,6 +400,12 @@ http {
     # Datacenter / abuse ASN (reads a geoip2 module variable — no DB in module)
     sentinel_asn $geoip2_asn;
     sentinel_datacenter_asn 16509 14618 15169 14061 16276;
+
+    # C2 IP deny-list — static radix tree, matches client IP (CIDR ok, no DB).
+    # Pairs with the abuse.ch Feodo Tracker C2 IP feed (see above).
+    sentinel_c2ip_deny 1.2.3.4 5.6.7.0/24;
+    # ... or generated from the Feodo feed:
+    #   include /etc/nginx/sentinel-c2ip-deny.conf;
 
     # JA3 TLS fingerprint deny-list (reads ssl-fingerprint module variable)
     # Pairs with the abuse.ch SSLBL malware/C2 JA3 feed (see below).
@@ -515,6 +571,7 @@ Use `sentinel_honeypot` for anything else (custom decoys, `/xmlrpc.php`, `/actua
 | Honeypot | `$sentinel_honeypot` | 90 | `sentinel_honeypot` prefix match |
 | Velocity | `$sentinel_velocity` | 30 | Per-identity rate exceeded in velocity zone |
 | ASN | `$sentinel_asn` | 35 | Client ASN in `sentinel_datacenter_asn` list |
+| C2 IP | `$sentinel_c2ip` | 80 | Client IP on `sentinel_c2ip_deny` radix list (abuse.ch Feodo C2) |
 | UA coherence | `$sentinel_coherence` | 40 | Browser UA + bare HTTP client headers |
 | JA3 (TLS) | `$sentinel_ja3` | 80 | TLS fingerprint on `sentinel_ja3_deny` list (abuse.ch SSLBL malware/C2) |
 | JA4 (TLS) | `$sentinel_ja4` | 50 | TLS fingerprint on `sentinel_ja4_deny` list |
@@ -541,6 +598,7 @@ All variables are `NOCACHEABLE` — they resolve to the value computed in PREACC
 | `$sentinel_honeypot` | `0/1` | Honeypot path hit |
 | `$sentinel_velocity` | `0/1` | Velocity exceeded |
 | `$sentinel_asn` | `0/1` | Flagged ASN |
+| `$sentinel_c2ip` | `0/1` | Client IP on C2 deny list (Feodo C2) |
 | `$sentinel_coherence` | `0/1` | UA/header incoherence |
 | `$sentinel_ja3` | `0/1` | JA3 deny-list hit (SSLBL malware/C2) |
 | `$sentinel_ja4` | `0/1` | JA4 deny-list hit |
@@ -563,7 +621,7 @@ log_format sentinel_json escape=json
     '"scanner":$sentinel_scanner,"bot":$sentinel_bot,'
     '"header":$sentinel_header_anomaly,"honeypot":$sentinel_honeypot,'
     '"velocity":$sentinel_velocity,"asn":$sentinel_asn,'
-    '"coherence":$sentinel_coherence,'
+    '"c2ip":$sentinel_c2ip,"coherence":$sentinel_coherence,'
     '"ja4":$sentinel_ja4,"ja4t":$sentinel_ja4t,'
     '"fcrdns":"$sentinel_fcrdns","allowlist":$sentinel_allowlist,'
     '"crowdsec":$sentinel_crowdsec,"crowdsec_action":"$sentinel_crowdsec_action",'
