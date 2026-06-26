@@ -550,6 +550,31 @@ http {{
             return 200 "ja3";
         }}
 
+        # TEST 26 (C2-IP signal): shadow mode. weight_bot/velocity zeroed so the
+        # delta is purely the C2-IP term (default w_c2ip 80). The deny list is a
+        # static feed (abuse.ch Feodo); the test runs from 127.0.0.1, so /c2ip
+        # denies 127.0.0.1/32 (flag) and /c2ip-clean denies an unrelated host
+        # (control). Both share the 127.0.0.1 identity, so the errrate baseline
+        # cancels and the delta isolates the c2ip term.
+        location = /c2ip {{
+            sentinel on;
+            sentinel_mode shadow;
+            sentinel_weight_bot 0;
+            sentinel_weight_velocity 0;
+            sentinel_c2ip_deny 127.0.0.1 10.0.0.0/8;
+            access_log {root}/logs/c2ip.log sentinelvars;
+            return 200 "c2ip";
+        }}
+        location = /c2ip-clean {{
+            sentinel on;
+            sentinel_mode shadow;
+            sentinel_weight_bot 0;
+            sentinel_weight_velocity 0;
+            sentinel_c2ip_deny 203.0.113.7 198.51.100.0/24;
+            access_log {root}/logs/c2ip.log sentinelvars;
+            return 200 "c2ip-clean";
+        }}
+
         # TEST 16 (coherence signal): shadow mode. weight_bot/velocity zeroed so
         # the delta is purely the coherence term (default w_coherence 40). A UA
         # that claims a browser (Chrome/...) but omits Accept/Accept-Language/
@@ -1916,6 +1941,33 @@ def main() -> int:
                     f"(w_ja3); got hit={ja3_hit} miss={ja3_miss}")
             print(f"  TEST 25 ja3: PASS "
                   f"(hit={ja3_hit}, miss={ja3_miss}, none={ja3_none})")
+
+            # TEST 26: C2-IP signal. The client IP (127.0.0.1) is matched against
+            # a static radix deny tree. /c2ip denies 127.0.0.1/32 (flag); /c2ip-
+            # clean denies unrelated ranges (control). Both share the 127.0.0.1
+            # identity so the errrate baseline cancels; the delta must be >=
+            # w_c2ip (80). weight_bot/velocity are zeroed in both locations.
+            fetch(args.port, "/c2ip")
+            fetch(args.port, "/c2ip-clean")
+            time.sleep(0.3)
+
+            c2ip_log = root / "server" / "logs" / "c2ip.log"
+            if not c2ip_log.exists():
+                raise AssertionError("c2ip.log not written")
+            c2lines = [ln.split() for ln in
+                       c2ip_log.read_text(encoding="utf-8").splitlines()
+                       if ln.strip()]
+            if len(c2lines) < 2:
+                raise AssertionError(
+                    f"c2ip.log: expected >= 2 lines, got {len(c2lines)}")
+            c2ip_hit  = int(c2lines[0][1])   # 127.0.0.1 in deny tree -> flagged
+            c2ip_miss = int(c2lines[1][1])   # 127.0.0.1 not in deny tree -> 0
+            if c2ip_hit - c2ip_miss < 80:
+                raise AssertionError(
+                    f"TEST 26 c2ip: flagged client IP must exceed control by >= 80 "
+                    f"(w_c2ip); got hit={c2ip_hit} miss={c2ip_miss}")
+            print(f"  TEST 26 c2ip: PASS "
+                  f"(hit={c2ip_hit}, miss={c2ip_miss})")
 
             # TEST 16: coherence signal. A browser-claiming UA with a bare
             # request (no Accept / Accept-Language / gzip) is incoherent and must

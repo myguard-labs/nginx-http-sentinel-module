@@ -69,6 +69,8 @@ static char *sentinel_conf_asn_source(ngx_conf_t *cf,
     ngx_command_t *cmd, void *conf);
 static char *sentinel_conf_datacenter_asn(ngx_conf_t *cf,
     ngx_command_t *cmd, void *conf);
+static char *sentinel_conf_c2ip_deny(ngx_conf_t *cf,
+    ngx_command_t *cmd, void *conf);
 static char *sentinel_conf_ja3_source(ngx_conf_t *cf,
     ngx_command_t *cmd, void *conf);
 static char *sentinel_conf_ja3_deny(ngx_conf_t *cf,
@@ -107,6 +109,8 @@ static ngx_int_t ngx_sentinel_var_honeypot(ngx_http_request_t *r,
 static ngx_int_t ngx_sentinel_var_velocity(ngx_http_request_t *r,
     ngx_http_variable_value_t *v, uintptr_t data);
 static ngx_int_t ngx_sentinel_var_asn(ngx_http_request_t *r,
+    ngx_http_variable_value_t *v, uintptr_t data);
+static ngx_int_t ngx_sentinel_var_c2ip(ngx_http_request_t *r,
     ngx_http_variable_value_t *v, uintptr_t data);
 static ngx_int_t ngx_sentinel_var_ja3(ngx_http_request_t *r,
     ngx_http_variable_value_t *v, uintptr_t data);
@@ -277,6 +281,23 @@ static ngx_command_t ngx_sentinel_commands[] = {
     { ngx_string("sentinel_datacenter_asn"),
       NGX_HTTP_MAIN_CONF | NGX_HTTP_SRV_CONF | NGX_HTTP_LOC_CONF | NGX_CONF_1MORE,
       sentinel_conf_datacenter_asn,
+      NGX_HTTP_LOC_CONF_OFFSET,
+      0,
+      NULL },
+
+    /* sentinel_weight_c2ip N; — added once if c2ip_flagged */
+    { ngx_string("sentinel_weight_c2ip"),
+      NGX_HTTP_MAIN_CONF | NGX_HTTP_SRV_CONF | NGX_HTTP_LOC_CONF | NGX_CONF_TAKE1,
+      ngx_conf_set_num_slot,
+      NGX_HTTP_LOC_CONF_OFFSET,
+      offsetof(ngx_sentinel_loc_conf_t, weights.c2ip),
+      NULL },
+
+    /* sentinel_c2ip_deny <ip|cidr> [...]; — static C2 IP deny list
+     * (typically the abuse.ch Feodo Tracker feed via feodo-c2ip-fetch.sh) */
+    { ngx_string("sentinel_c2ip_deny"),
+      NGX_HTTP_MAIN_CONF | NGX_HTTP_SRV_CONF | NGX_HTTP_LOC_CONF | NGX_CONF_1MORE,
+      sentinel_conf_c2ip_deny,
       NGX_HTTP_LOC_CONF_OFFSET,
       0,
       NULL },
@@ -728,6 +749,9 @@ static ngx_http_variable_t ngx_sentinel_vars[] = {
     { ngx_string("sentinel_asn"), NULL,
       ngx_sentinel_var_asn, 0, NGX_HTTP_VAR_NOCACHEABLE, 0 },
 
+    { ngx_string("sentinel_c2ip"), NULL,
+      ngx_sentinel_var_c2ip, 0, NGX_HTTP_VAR_NOCACHEABLE, 0 },
+
     { ngx_string("sentinel_ja3"), NULL,
       ngx_sentinel_var_ja3, 0, NGX_HTTP_VAR_NOCACHEABLE, 0 },
 
@@ -826,6 +850,7 @@ ngx_sentinel_get_ctx(ngx_http_request_t *r)
     sentinel_allowlist_signal(r, lcf, &ctx->inputs);
     sentinel_velocity_signal(r, lcf, &ctx->inputs);
     sentinel_asn_signal(r, lcf, &ctx->inputs);
+    sentinel_c2ip_signal(r, lcf, &ctx->inputs);
     sentinel_ja3_signal(r, lcf, &ctx->inputs);
     sentinel_ja4_signal(r, lcf, &ctx->inputs);
     sentinel_ja4t_signal(r, lcf, &ctx->inputs);
@@ -1001,6 +1026,27 @@ ngx_sentinel_var_asn(ngx_http_request_t *r, ngx_http_variable_value_t *v,
 
     v->len  = 1;
     v->data = (u_char *) (ctx->inputs.datacenter_asn ? "1" : "0");
+    v->valid  = 1;
+    v->not_found   = 0;
+    v->no_cacheable = 0;
+
+    return NGX_OK;
+}
+
+static ngx_int_t
+ngx_sentinel_var_c2ip(ngx_http_request_t *r, ngx_http_variable_value_t *v,
+    uintptr_t data)
+{
+    ngx_sentinel_ctx_t  *ctx;
+
+    ctx = ngx_sentinel_get_ctx(r);
+    if (ctx == NULL) {
+        v->not_found = 1;
+        return NGX_OK;
+    }
+
+    v->len  = 1;
+    v->data = (u_char *) (ctx->inputs.c2ip_flagged ? "1" : "0");
     v->valid  = 1;
     v->not_found   = 0;
     v->no_cacheable = 0;
@@ -1373,7 +1419,7 @@ ngx_sentinel_preaccess_handler(ngx_http_request_t *r)
     ngx_log_error(NGX_LOG_INFO, r->connection->log, 0,
                   "sentinel: score=%i verdict=%s ja4h=%s "
                   "shadow=%i errrate=%ui bot=%i scanner=%i header=%i "
-                  "honeypot=%i velocity=%i asn=%i ja3=%i ja4=%i ja4t=%i coherence=%i "
+                  "honeypot=%i velocity=%i asn=%i c2ip=%i ja3=%i ja4=%i ja4t=%i coherence=%i "
                   "fcrdns_verified=%i fcrdns_spoofed=%i "
                   "allowlist=%i crowdsec=%i cs_action=%ui pow=%ui",
                   ctx->score,
@@ -1387,6 +1433,7 @@ ngx_sentinel_preaccess_handler(ngx_http_request_t *r)
                   (ngx_int_t) ctx->inputs.honeypot,
                   (ngx_int_t) ctx->inputs.velocity_exceeded,
                   (ngx_int_t) ctx->inputs.datacenter_asn,
+                  (ngx_int_t) ctx->inputs.c2ip_flagged,
                   (ngx_int_t) ctx->inputs.ja3_flagged,
                   (ngx_int_t) ctx->inputs.ja4_flagged,
                   (ngx_int_t) ctx->inputs.ja4t_flagged,
@@ -1804,6 +1851,8 @@ ngx_sentinel_create_loc_conf(ngx_conf_t *cf)
 
     /* asn_source NULL + asn_list empty via pcalloc; opt-in signal. */
     lcf->weights.asn     = NGX_CONF_UNSET;
+    /* c2ip_tree/c2ip_tree6 NULL via pcalloc; opt-in signal. */
+    lcf->weights.c2ip    = NGX_CONF_UNSET;
     /* ja3_source NULL + ja3_list empty via pcalloc; opt-in signal. */
     lcf->weights.ja3     = NGX_CONF_UNSET;
     /* ja4_source NULL + ja4_list empty via pcalloc; opt-in signal. */
@@ -1895,6 +1944,9 @@ ngx_sentinel_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
     ngx_conf_merge_value(conf->weights.asn,
                          prev->weights.asn,
                          NGX_SENTINEL_DEFAULT_W_ASN);
+    ngx_conf_merge_value(conf->weights.c2ip,
+                         prev->weights.c2ip,
+                         NGX_SENTINEL_DEFAULT_W_C2IP);
     ngx_conf_merge_value(conf->weights.ja3,
                          prev->weights.ja3,
                          NGX_SENTINEL_DEFAULT_W_JA3);
@@ -1997,6 +2049,14 @@ ngx_sentinel_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
     }
     if (conf->asn_list.nelts == 0 && prev->asn_list.nelts > 0) {
         conf->asn_list = prev->asn_list;
+    }
+
+    /* Inherit C2 IP deny trees from parent if none set locally. */
+    if (conf->c2ip_tree == NULL) {
+        conf->c2ip_tree = prev->c2ip_tree;
+    }
+    if (conf->c2ip_tree6 == NULL) {
+        conf->c2ip_tree6 = prev->c2ip_tree6;
     }
 
     /* Inherit JA3 source + deny list from parent if not set locally. */
@@ -3157,6 +3217,88 @@ sentinel_conf_datacenter_asn(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
         }
 
         *slot = (ngx_uint_t) v;
+    }
+
+    return NGX_CONF_OK;
+}
+
+
+/* ----------------------------------------------------------------------
+ * sentinel_c2ip_deny <ip|cidr> [...];  — static C2 IP deny list.
+ *
+ * Each token is parsed as an IPv4/IPv6 address or CIDR and inserted into a
+ * per-family radix tree (built lazily on first use, from cf->pool — outlives
+ * config parsing, owned by the cycle). Looked up by longest prefix at request
+ * time in sentinel_c2ip_signal(). Typically fed the abuse.ch Feodo Tracker C2
+ * IP list via tools/feodo-c2ip-fetch.sh (one big sentinel_c2ip_deny block).
+ * ---------------------------------------------------------------------- */
+
+static char *
+sentinel_conf_c2ip_deny(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
+{
+    ngx_sentinel_loc_conf_t  *lcf = conf;
+    ngx_str_t                *value;
+    ngx_cidr_t                cidr;
+    ngx_uint_t                i;
+    ngx_int_t                 rc;
+
+    value = cf->args->elts;
+
+    for (i = 1; i < cf->args->nelts; i++) {
+
+        rc = ngx_ptocidr(&value[i], &cidr);
+        if (rc == NGX_ERROR) {
+            ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                               "sentinel_c2ip_deny: invalid address \"%V\"",
+                               &value[i]);
+            return NGX_CONF_ERROR;
+        }
+        if (rc == NGX_DONE) {
+            /* host bits set beyond the mask — usable, but warn (geo idiom) */
+            ngx_conf_log_error(NGX_LOG_WARN, cf, 0,
+                               "sentinel_c2ip_deny: low address bits of \"%V\" "
+                               "are meaningless", &value[i]);
+        }
+
+        switch (cidr.family) {
+
+        case AF_INET:
+            if (lcf->c2ip_tree == NULL) {
+                lcf->c2ip_tree = ngx_radix_tree_create(cf->pool, -1);
+                if (lcf->c2ip_tree == NULL) {
+                    return NGX_CONF_ERROR;
+                }
+            }
+            rc = ngx_radix32tree_insert(lcf->c2ip_tree,
+                                        ntohl(cidr.u.in.addr),
+                                        ntohl(cidr.u.in.mask), 1);
+            break;
+
+#if (NGX_HAVE_INET6)
+        case AF_INET6:
+            if (lcf->c2ip_tree6 == NULL) {
+                lcf->c2ip_tree6 = ngx_radix_tree_create(cf->pool, -1);
+                if (lcf->c2ip_tree6 == NULL) {
+                    return NGX_CONF_ERROR;
+                }
+            }
+            rc = ngx_radix128tree_insert(lcf->c2ip_tree6,
+                                         cidr.u.in6.addr.s6_addr,
+                                         cidr.u.in6.mask.s6_addr, 1);
+            break;
+#endif
+
+        default:
+            ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                               "sentinel_c2ip_deny: unsupported address family "
+                               "for \"%V\"", &value[i]);
+            return NGX_CONF_ERROR;
+        }
+
+        /* NGX_BUSY = duplicate prefix already present — harmless. */
+        if (rc == NGX_ERROR) {
+            return NGX_CONF_ERROR;
+        }
     }
 
     return NGX_CONF_OK;
