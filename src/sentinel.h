@@ -62,6 +62,7 @@
 #define NGX_SENTINEL_DEFAULT_W_VELOCITY 30   /* request-rate abuse: meaningful but below scanner/honeypot */
 #define NGX_SENTINEL_DEFAULT_W_ASN     35    /* request from a flagged datacenter/abuse ASN */
 #define NGX_SENTINEL_DEFAULT_W_COHERENCE 40  /* UA claims a browser but request shape disagrees */
+#define NGX_SENTINEL_DEFAULT_W_JA3     80    /* client JA3 (TLS) fp on operator deny list (abuse.ch SSLBL = malware/C2, high confidence) */
 #define NGX_SENTINEL_DEFAULT_W_JA4     50    /* client JA4 (TLS) fp on operator deny list */
 #define NGX_SENTINEL_DEFAULT_W_JA4T    45    /* client JA4T (TCP) fp on operator deny list */
 #define NGX_SENTINEL_VELOCITY_DEFAULT_THRESHOLD 100  /* requests per window */
@@ -275,6 +276,7 @@ typedef enum {
     NGX_SENTINEL_M_SIG_ASN,
     NGX_SENTINEL_M_SIG_COHERENCE,
     NGX_SENTINEL_M_SIG_CROWDSEC,
+    NGX_SENTINEL_M_SIG_JA3,
     NGX_SENTINEL_M_SIG_JA4,
     NGX_SENTINEL_M_SIG_JA4T,
 
@@ -379,6 +381,11 @@ typedef struct {
      * Accept-Language / gzip Accept-Encoding, or pre-HTTP/1.1) */
     ngx_flag_t  ua_incoherent;
 
+    /* JA3 (TLS): client's JA3 MD5 TLS fingerprint (from an operator-supplied
+     * ssl-fingerprint variable, e.g. $ssl_fingerprint_ja3_hash) matched the
+     * operator's deny list (typically the abuse.ch SSLBL malware/C2 feed) */
+    ngx_flag_t  ja3_flagged;
+
     /* JA4 (TLS): client's JA4 TLS fingerprint (from an operator-supplied
      * ssl-fingerprint variable, e.g. $ssl_fingerprint_ja4) matched the
      * operator's deny list */
@@ -443,6 +450,7 @@ typedef struct {
     ngx_int_t  velocity;  /* added once if velocity_exceeded */
     ngx_int_t  asn;       /* added once if datacenter_asn      */
     ngx_int_t  coherence; /* added once if ua_incoherent       */
+    ngx_int_t  ja3;       /* added once if ja3_flagged          */
     ngx_int_t  ja4;       /* added once if ja4_flagged          */
     ngx_int_t  ja4t;      /* added once if ja4t_flagged         */
     ngx_int_t  crowdsec;  /* base weight for a crowdsec ban hit (tiered) */
@@ -493,6 +501,14 @@ typedef struct {
      * asn_list. No libmaxminddb link — the geoip2 module owns the DB. */
     ngx_http_complex_value_t *asn_source;         /* NULL = signal off */
     ngx_array_t              asn_list;            /* ngx_uint_t[] flagged ASNs */
+
+    /* JA3 (TLS) signal: operator points sentinel_ja3 at an ssl-fingerprint
+     * JA3 MD5 variable; the value is matched (case-insensitive) against
+     * ja3_list at request time. No openssl link / no TLS internals — the
+     * ssl-fingerprint module owns the ClientHello parse. Deny list is
+     * typically the abuse.ch SSLBL JA3 feed (malware/C2 clients). */
+    ngx_http_complex_value_t *ja3_source;         /* NULL = signal off */
+    ngx_array_t              ja3_list;            /* ngx_str_t[] denied JA3 fps */
 
     /* JA4 (TLS) signal: operator points sentinel_ja4 at an ssl-fingerprint
      * JA4 variable; the value is matched (case-insensitive) against ja4_list
@@ -710,6 +726,17 @@ void sentinel_velocity_signal(ngx_http_request_t *r,
  * empty or non-numeric value → datacenter_asn = 0.
  */
 void sentinel_asn_signal(ngx_http_request_t *r,
+    ngx_sentinel_loc_conf_t *lcf, ngx_sentinel_inputs_t *inputs);
+
+/*
+ * sentinel_ja3_signal — evaluate lcf->ja3_source (an operator-supplied
+ * ssl-fingerprint JA3 MD5 variable, e.g. $ssl_fingerprint_ja3_hash) and set
+ * inputs->ja3_flagged = 1 if its value matches (case-insensitive) any entry in
+ * lcf->ja3_list (typically the abuse.ch SSLBL feed). No openssl link, no TLS
+ * internals, no malloc in the request path.
+ * Fail-open: NULL args / no source / empty list / empty value → 0.
+ */
+void sentinel_ja3_signal(ngx_http_request_t *r,
     ngx_sentinel_loc_conf_t *lcf, ngx_sentinel_inputs_t *inputs);
 
 /*

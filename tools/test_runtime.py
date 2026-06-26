@@ -177,6 +177,14 @@ http {{
         default "";
         "~." $http_x_test_ja4t;
     }}
+
+    # TEST 25 (JA3-TLS signal): synthesize an ssl-fingerprint JA3 MD5 variable
+    # from a test header. In production the operator maps $ssl_fingerprint_ja3_hash
+    # here instead; the deny list is typically the abuse.ch SSLBL JA3 feed.
+    map $http_x_test_ja3 $test_ja3 {{
+        default "";
+        "~." $http_x_test_ja3;
+    }}
 {cs_zone}{redis_zone}
 
     server {{
@@ -524,6 +532,22 @@ http {{
             sentinel_ja4t_deny T13D1516H2_8DAAF6152771_B186095E22B6;
             access_log {root}/logs/ja4t.log sentinelvars;
             return 200 "ja4t";
+        }}
+
+        # TEST 25 (JA3-TLS signal): shadow mode. weight_bot/velocity zeroed so
+        # the delta is purely the JA3 term (default w_ja3 80). Client controls
+        # the JA3 via X-Test-JA3, fed through $test_ja3 into sentinel_ja3. The
+        # deny entry mimics the abuse.ch SSLBL feed (a JA3 MD5 hash). Case-
+        # insensitive match: deny entry upper-case, request sends lower-case.
+        location = /ja3 {{
+            sentinel on;
+            sentinel_mode shadow;
+            sentinel_weight_bot 0;
+            sentinel_weight_velocity 0;
+            sentinel_ja3 $test_ja3;
+            sentinel_ja3_deny E7D705A3286E19EA42F587B344EE6865;
+            access_log {root}/logs/ja3.log sentinelvars;
+            return 200 "ja3";
         }}
 
         # TEST 16 (coherence signal): shadow mode. weight_bot/velocity zeroed so
@@ -1857,6 +1881,41 @@ def main() -> int:
                     f"(w_ja4t); got hit={ja4t_hit} miss={ja4t_miss}")
             print(f"  TEST 24 ja4t: PASS "
                   f"(hit={ja4t_hit}, miss={ja4t_miss}, none={ja4t_none})")
+
+            # TEST 25: JA3-TLS signal. Same shape as TEST 23 but the JA3 MD5
+            # comes from X-Test-JA3 (in prod: $ssl_fingerprint_ja3_hash, deny
+            # list = abuse.ch SSLBL feed). Denied fp (lower-case vs upper-case
+            # deny -> case-insensitive) must score >= w_ja3 (80); a different
+            # JA3 and no header must both score 0. weight_bot/velocity are
+            # zeroed in /ja3, so the score IS the JA3 term.
+            denied_ja3 = "e7d705a3286e19ea42f587b344ee6865"
+            fetch(args.port, "/ja3", extra_headers={"X-Test-JA3": denied_ja3})
+            fetch(args.port, "/ja3", extra_headers={"X-Test-JA3": "00000000000000000000000000000000"})
+            fetch(args.port, "/ja3")
+            time.sleep(0.3)
+
+            ja3_log = root / "server" / "logs" / "ja3.log"
+            if not ja3_log.exists():
+                raise AssertionError("ja3.log not written")
+            j3lines = [ln.split() for ln in
+                       ja3_log.read_text(encoding="utf-8").splitlines()
+                       if ln.strip()]
+            if len(j3lines) < 3:
+                raise AssertionError(
+                    f"ja3.log: expected >= 3 lines, got {len(j3lines)}")
+            ja3_hit  = int(j3lines[0][1])   # denied fp -> flagged
+            ja3_miss = int(j3lines[1][1])   # other fp  -> not flagged
+            ja3_none = int(j3lines[2][1])   # no header -> empty -> off
+            if ja3_miss != ja3_none:
+                raise AssertionError(
+                    f"TEST 25 ja3: unflagged and missing JA3 must score equally; "
+                    f"got miss={ja3_miss} none={ja3_none}")
+            if ja3_hit - ja3_miss < 80:
+                raise AssertionError(
+                    f"TEST 25 ja3: denied JA3 must exceed control by >= 80 "
+                    f"(w_ja3); got hit={ja3_hit} miss={ja3_miss}")
+            print(f"  TEST 25 ja3: PASS "
+                  f"(hit={ja3_hit}, miss={ja3_miss}, none={ja3_none})")
 
             # TEST 16: coherence signal. A browser-claiming UA with a bare
             # request (no Accept / Accept-Language / gzip) is incoherent and must

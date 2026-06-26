@@ -15,6 +15,7 @@
  *         + w_honeypot * honeypot
  *         + w_velocity * velocity_exceeded
  *         + w_asn      * datacenter_asn
+ *         + w_ja3      * ja3_flagged
  *         + w_ja4      * ja4_flagged
  *         + w_ja4t     * ja4t_flagged
  *         + w_coherence * ua_incoherent
@@ -146,6 +147,11 @@ sentinel_score_compute(const ngx_sentinel_inputs_t *inputs,
     /* datacenter_asn — request originates from a flagged datacenter/abuse ASN */
     if (inputs->datacenter_asn) {
         sentinel_score_add(&score, w->asn);
+    }
+
+    /* ja3_flagged — client JA3 (TLS) fingerprint on the operator deny list */
+    if (inputs->ja3_flagged) {
+        sentinel_score_add(&score, w->ja3);
     }
 
     /* ja4_flagged — client JA4 (TLS) fingerprint on the operator deny list */
