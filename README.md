@@ -712,11 +712,11 @@ Example PromQL: `rate(sentinel_verdict_total{v="block"}[5m])`
 ## See also
 
 - Sibling modules:
-  - [nginx-error-abuse-module](https://github.com/eilandert/nginx-error-abuse-module) — predecessor; sentinel absorbs its error-rate logic
-  - [nginx-autocert-module](https://github.com/eilandert/nginx-autocert-module)
-  - [nginx-strip-filter-module](https://github.com/eilandert/nginx-strip-filter-module)
-  - [nginx-cache-turbo-module](https://github.com/eilandert/nginx-cache-turbo-module)
-  - [nginx-label-autoconf-module](https://github.com/eilandert/nginx-label-autoconf-module)
+  - [nginx-error-abuse-module](https://github.com/myguard-labs/nginx-error-abuse-module) — predecessor; sentinel absorbs its error-rate logic
+  - [nginx-autocert-module](https://github.com/myguard-labs/nginx-autocert-module)
+  - [nginx-strip-filter-module](https://github.com/myguard-labs/nginx-strip-filter-module)
+  - [nginx-cache-turbo-module](https://github.com/myguard-labs/nginx-cache-turbo-module)
+  - [nginx-label-autoconf-module](https://github.com/myguard-labs/nginx-label-autoconf-module)
 - [Pitch / design overview](https://deb.myguard.nl/pitch-ngx_http_sentinel-unified-client-reputation-tarpit-module/)
 - Package: [nginx-modules stack](https://deb.myguard.nl/nginx-modules/) · [angie-modules stack](https://deb.myguard.nl/angie-modules-optimized-extended/)
 
