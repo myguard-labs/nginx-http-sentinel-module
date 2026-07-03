@@ -1,4 +1,4 @@
-name: Valgrind
+name: Helgrind
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -6,22 +6,22 @@ env:
 
 on:
   schedule:
-    # Monthly, 1st @ 03:30 UTC.
-    - cron: "30 3 1 * *"
+    # Monthly, 1st @ 04:30 UTC.
+    - cron: "30 4 1 * *"
   workflow_dispatch: {}
 
 concurrency:
-  group: valgrind-${{ github.ref }}
+  group: helgrind-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
   contents: read
 
 jobs:
-  memcheck:
-    name: Memcheck
+  helgrind:
+    name: Helgrind
     runs-on: [self-hosted, builder02, lxc]
-    # Long monthly memcheck soak on self-hosted — no GitHub 6h cap.
+    # Long monthly thread-error (data-race / lock-order) soak on self-hosted.
     timeout-minutes: 240
     steps:
       - name: Checkout
@@ -42,34 +42,32 @@ jobs:
       - name: Build debug server and module
         run: bash tools/ci-build.sh nginx "$NGINX_VERSION" debug
 
-      - name: Run runtime suite under Memcheck
+      - name: Run runtime suite under Helgrind
         run: |
-          runner="valgrind --tool=memcheck --track-origins=yes --leak-check=full"
-          runner="$runner --show-leak-kinds=definite,indirect"
-          runner="$runner --errors-for-leak-kinds=definite,indirect --error-exitcode=99"
+          runner="valgrind --tool=helgrind --error-exitcode=99"
           runner="$runner --suppressions=$GITHUB_WORKSPACE/tools/valgrind.supp"
-          runner="$runner --log-file=$GITHUB_WORKSPACE/valgrind-%p.log"
+          runner="$runner --log-file=$GITHUB_WORKSPACE/helgrind-%p.log"
           python3 tools/test_runtime.py \
             --single-process \
             --runner "$runner" \
             --nginx-binary "$GITHUB_WORKSPACE/.build/nginx-${NGINX_VERSION}/objs/nginx" \
             --module "$GITHUB_WORKSPACE/.build/nginx-${NGINX_VERSION}/objs/ngx_http_sentinel_module.so"
 
-      - name: Verify Memcheck reports
+      - name: Verify Helgrind reports
         if: always()
         run: |
-          cat valgrind-*.log || true
-          if grep -Eq 'ERROR SUMMARY: [1-9][0-9]* errors' valgrind-*.log; then
+          cat helgrind-*.log || true
+          if grep -Eq 'ERROR SUMMARY: [1-9][0-9]* errors' helgrind-*.log; then
             exit 1
           fi
-          grep -Eq 'ERROR SUMMARY: 0 errors' valgrind-*.log
+          grep -Eq 'ERROR SUMMARY: 0 errors' helgrind-*.log
 
-      - name: Upload Memcheck reports
+      - name: Upload Helgrind reports
         if: always()
         uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
         with:
-          name: valgrind-reports
-          path: valgrind-*.log
+          name: helgrind-reports
+          path: helgrind-*.log
           retention-days: 14
 
       - name: Notify Discord on failure
