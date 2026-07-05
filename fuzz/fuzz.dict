@@ -1,0 +1,68 @@
+# libFuzzer dictionary for ngx_http_sentinel_module fuzz targets.
+#
+# Helps two targets:
+#   fuzz_botua       — bot / scanner User-Agent substrings the scanner matches
+#   fuzz_ja4h_canon  — HTTP methods, versions, and header names the JA4H
+#                      canonical-string builder walks
+# NOT used by fuzz_feed (CRC32-gated binary format; a token dict cannot help
+# it satisfy the checksum).
+#
+# NOTE: whitespace MUST be a hex escape (\x09 tab, \x20 space, \x0d CR,
+# \x0a LF). libFuzzer's ParseDictionaryFile rejects literal \t / \n.
+
+# --- bot / scanner User-Agent substrings (fuzz_botua) ---------------------
+ua_googlebot="Googlebot"
+ua_bingbot="Bingbot"
+ua_baidu="Baiduspider"
+ua_yandex="YandexBot"
+ua_duckduck="DuckDuckBot"
+ua_slurp="Slurp"
+ua_facebot="facebot"
+ua_ia_archiver="ia_archiver"
+ua_uptimerobot="UptimeRobot"
+ua_pingdom="Pingdom"
+ua_pyrequests="python-requests"
+ua_libwww="libwww-perl"
+ua_masscan="masscan"
+ua_zgrab="zgrab"
+ua_nmap="nmap"
+ua_nikto="nikto"
+ua_sqlmap="sqlmap"
+ua_wpscan="wpscan"
+ua_acunetix="acunetix"
+ua_burp="Burp"
+ua_metasploit="metasploit"
+ua_nuclei="nuclei"
+ua_ffuf="ffuf"
+ua_gobuster="gobuster"
+ua_dirbuster="dirbuster"
+ua_feroxbuster="feroxbuster"
+
+# --- HTTP methods / versions (fuzz_ja4h_canon) ----------------------------
+m_get="GET"
+m_post="POST"
+m_put="PUT"
+m_head="HEAD"
+m_options="OPTIONS"
+m_delete="DELETE"
+m_patch="PATCH"
+v_http10="HTTP/1.0"
+v_http11="HTTP/1.1"
+v_http2="HTTP/2"
+
+# --- common request header names the JA4H walker sorts --------------------
+h_cookie="Cookie"
+h_referer="Referer"
+h_accept="Accept"
+h_accept_lang="Accept-Language"
+h_accept_enc="Accept-Encoding"
+h_user_agent="User-Agent"
+h_conn="Connection"
+h_cache="Cache-Control"
+h_content_type="Content-Type"
+h_content_len="Content-Length"
+
+# --- structural bytes: header separator (CRLF), name:value colon+space ----
+sep_crlf="\x0d\x0a"
+sep_colon_sp="\x3a\x20"
+sep_lang="en-US,en;q=0.9"

@@ -5,8 +5,8 @@
 # fuzz/build.sh -- Build all libFuzzer targets for ngx_http_sentinel_module.
 #
 # Usage:
-#   bash fuzz/build.sh             # build all targets into fuzz/bin/
-#   bash fuzz/build.sh clean       # remove fuzz/bin/
+#   bash fuzz/build.sh             # build all targets into fuzz/
+#   bash fuzz/build.sh clean       # remove built fuzz binaries
 #
 # Requirements: clang with -fsanitize=fuzzer support, libssl-dev.
 # The nginx source tree must be present at .build/nginx-<VER>/ (as populated
@@ -17,11 +17,13 @@ set -eu
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-BIN_DIR="$REPO_ROOT/fuzz/bin"
+# Fuzz binaries build INTO the top-level fuzz/ directory (directory
+# normalisation: every module keeps its fuzz_* binaries next to their corpora).
+BIN_DIR="$REPO_ROOT/fuzz"
 
 if [ "${1:-}" = "clean" ]; then
-    rm -rf "$BIN_DIR"
-    echo "fuzz/bin/ removed"
+    rm -f "$BIN_DIR/fuzz_feed" "$BIN_DIR/fuzz_botua" "$BIN_DIR/fuzz_ja4h_canon"
+    echo "fuzz binaries removed"
     exit 0
 fi
 
@@ -96,4 +98,4 @@ echo
 echo "Quick smoke-run (each target 15 s):"
 echo "  $BIN_DIR/fuzz_feed    -max_total_time=15 $REPO_ROOT/fuzz/corpus/fuzz_feed"
 echo "  $BIN_DIR/fuzz_botua   -max_total_time=15 $REPO_ROOT/fuzz/corpus/fuzz_botua"
-echo "  $BIN_DIR/fuzz_ja4h_canon -max_total_time=15 $REPO_ROOT/fuzz/corpus/fuzz_ja4h"
+echo "  $BIN_DIR/fuzz_ja4h_canon -max_total_time=15 $REPO_ROOT/fuzz/corpus/fuzz_ja4h_canon"

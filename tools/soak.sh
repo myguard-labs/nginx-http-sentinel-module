@@ -186,11 +186,19 @@ export ASAN_OPTIONS
 export UBSAN_OPTIONS="${UBSAN_OPTIONS:-}:print_stacktrace=1:halt_on_error=1"
 
 RUN=("$NGINX" -p "$WORK" -c "$WORK/conf/nginx.conf")
-if [ "${USE_VALGRIND:-0}" = "1" ]; then
+# Suppression file (nginx-core arena leaks) lives at tools/valgrind.supp.
+SUPP="$(cd "$(dirname "$0")" && pwd)/valgrind.supp"
+if [ "${USE_HELGRIND:-0}" = "1" ]; then
+    # Thread-error (data-race / lock-order) soak. --error-exitcode=99 so a
+    # detected race FAILS the job; suppressions apply here too.
+    VG=(valgrind --tool=helgrind --error-exitcode=99
+        --log-file="$WORK/logs/valgrind.%p")
+    [ -f "$SUPP" ] && VG+=(--suppressions="$SUPP")
+    RUN=("${VG[@]}" "${RUN[@]}")
+elif [ "${USE_VALGRIND:-0}" = "1" ]; then
     VG=(valgrind --error-exitcode=99 --leak-check=full
         --errors-for-leak-kinds=definite
         --log-file="$WORK/logs/valgrind.%p")
-    SUPP="$(cd "$(dirname "$0")/.." && pwd)/valgrind.suppress"
     [ -f "$SUPP" ] && VG+=(--suppressions="$SUPP")
     RUN=("${VG[@]}" "${RUN[@]}")
 fi
@@ -203,7 +211,7 @@ for _ in $(seq 1 100); do
     sleep 0.1
 done
 
-echo "soak: ${DURATION}s, concurrency ${CONC}$( [ "${USE_VALGRIND:-0}" = 1 ] && echo ' (valgrind)')"
+echo "soak: ${DURATION}s, concurrency ${CONC}$( [ "${USE_HELGRIND:-0}" = 1 ] && echo ' (helgrind)'; [ "${USE_VALGRIND:-0}" = 1 ] && echo ' (memcheck)')"
 END=$(( $(date +%s) + DURATION ))
 
 # Assertion markers written by background workers.
