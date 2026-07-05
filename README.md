@@ -1,5 +1,9 @@
 # nginx-http-sentinel-module
 
+[![Build & Test](https://github.com/myguard-labs/nginx-http-sentinel-module/actions/workflows/build-test.yml/badge.svg)](https://github.com/myguard-labs/nginx-http-sentinel-module/actions/workflows/build-test.yml)
+[![CI Fast](https://github.com/myguard-labs/nginx-http-sentinel-module/actions/workflows/ci-fast.yml/badge.svg)](https://github.com/myguard-labs/nginx-http-sentinel-module/actions/workflows/ci-fast.yml)
+[![CI Deep](https://github.com/myguard-labs/nginx-http-sentinel-module/actions/workflows/ci-deep.yml/badge.svg)](https://github.com/myguard-labs/nginx-http-sentinel-module/actions/workflows/ci-deep.yml)
+
 A single nginx PREACCESS module that scores every client and acts on the verdict —
 tarpit bots, block scanners, PoW-challenge grey-area requests, feed decisions back
 to CrowdSec. No network in the request path, no external process, no added latency.
