@@ -289,6 +289,16 @@ sentinel_cssink_timer_handler(ngx_event_t *ev)
     ngx_uint_t                    drained = 0;
 
     /*
+     * Never re-arm during shutdown/reload. Both re-arm sites below would
+     * otherwise keep this worker's timer tree non-empty and block graceful
+     * exit (leaked old workers on `nginx -s reload`). Returning here drops
+     * at most one final drain tick, which is harmless.
+     */
+    if (ngx_exiting || ngx_terminate) {
+        return;
+    }
+
+    /*
      * ONLY the owner (worker 0) drains the ring — it is the sole consumer, so
      * every enqueued ban is observed exactly once and lands in the decision
      * set. A non-owner must NOT dequeue (it would discard the entry the owner

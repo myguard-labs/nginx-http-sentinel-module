@@ -463,6 +463,12 @@ sentinel_redis_teardown(sentinel_redis_ctx_t *rc)
 static void
 sentinel_redis_schedule_reconnect(sentinel_redis_ctx_t *rc)
 {
+    /* Never re-arm during shutdown/reload: a self-perpetuating timer keeps
+     * the worker's timer tree non-empty and blocks graceful exit. */
+    if (ngx_exiting || ngx_terminate) {
+        return;
+    }
+
     if (rc->backoff < NGX_SENTINEL_REDIS_BACKOFF_MIN_MS) {
         rc->backoff = NGX_SENTINEL_REDIS_BACKOFF_MIN_MS;
     }
@@ -849,9 +855,11 @@ sentinel_redis_timer_handler(ngx_event_t *ev)
     }
 
     /* Re-arm the periodic tick UNLESS a reconnect timer was just scheduled
-     * (schedule_reconnect owns the timer when DOWN). */
-    if (rc->state == SENTINEL_REDIS_UP
-        || rc->state == SENTINEL_REDIS_CONNECTING)
+     * (schedule_reconnect owns the timer when DOWN) — and never during
+     * shutdown/reload (would block graceful worker exit). */
+    if (!ngx_exiting && !ngx_terminate
+        && (rc->state == SENTINEL_REDIS_UP
+            || rc->state == SENTINEL_REDIS_CONNECTING))
     {
         ngx_add_timer(&rc->timer, (ngx_msec_t) rc->lcf->redis_interval * 1000);
     }

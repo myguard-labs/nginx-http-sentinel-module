@@ -1,5 +1,16 @@
 # TODO — ngx_http_sentinel_module
 
+## RESOLVED 2026-07-05 — background timers blocked graceful worker exit
+- [x] `[opus]` **BUG (shippable-blocker): self-re-arming background timers never
+  checked `ngx_exiting`/`ngx_terminate`** → on `nginx -s reload`/shutdown the
+  worker's timer tree never emptied → workers hung forever (worker_shutdown_timeout
+  cannot reap module timers on internal events). Surfaced by the memcheck soak
+  (CI Fast) hanging until the 45-min job timeout. Fixed in feed / redis / cssink
+  timer handlers (bail before re-arm when exiting). Tarpit left as-is (deadline-
+  bounded, real client conn, reaped by worker_shutdown_timeout). soak.sh hardened:
+  curl `-m 10`, `worker_shutdown_timeout 5s` in conf, 30s force-kill backstop.
+  Verified: valgrind soak `soak clean … rc=0`, 34 unit tests pass.
+
 Phased build plan. Each phase = own feat branch off `dev` → PR to **`dev`** →
 **local CI green** → merge. NO remote CI on dev. master PRs only on user word
 (unsquashed + remote CI). Tier tag `[haiku|sonnet|opus-low|opus|codex]` = cheapest
