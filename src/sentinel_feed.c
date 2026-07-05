@@ -619,7 +619,14 @@ sentinel_feed_timer_handler(ngx_event_t *ev)
 
     sentinel_feed_do_load(t);
 
-    /* Re-arm (interval in ms). Workers exiting set ev->timer_set off normally. */
+    /* Do NOT re-arm during shutdown/reload. nginx will not auto-cancel a
+     * self-re-arming module timer, so an unconditional re-arm keeps the
+     * worker's timer tree non-empty and the worker never exits gracefully
+     * (leaked old workers on `nginx -s reload`). Bail on exit/terminate. */
+    if (ngx_exiting || ngx_terminate) {
+        return;
+    }
+
     ngx_add_timer(ev, (ngx_msec_t) t->lcf->cs_interval * 1000);
 }
 

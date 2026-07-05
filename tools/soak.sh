@@ -111,6 +111,11 @@ $LOAD_MODULE
 daemon off;
 master_process on;
 worker_processes 2;
+# Force graceful shutdown to close lingering (tarpit-held) connections
+# promptly. Without this, SIGQUIT workers wait indefinitely for tarpit
+# drips to drain -- under valgrind that never converges and the soak
+# hangs waiting for the nginx master to exit.
+worker_shutdown_timeout 5s;
 error_log $WORK/logs/error.log info;
 pid $WORK/logs/nginx.pid;
 events { worker_connections 256; }
@@ -186,11 +191,19 @@ export ASAN_OPTIONS
 export UBSAN_OPTIONS="${UBSAN_OPTIONS:-}:print_stacktrace=1:halt_on_error=1"
 
 RUN=("$NGINX" -p "$WORK" -c "$WORK/conf/nginx.conf")
-if [ "${USE_VALGRIND:-0}" = "1" ]; then
+# Suppression file (nginx-core arena leaks) lives at tools/valgrind.supp.
+SUPP="$(cd "$(dirname "$0")" && pwd)/valgrind.supp"
+if [ "${USE_HELGRIND:-0}" = "1" ]; then
+    # Thread-error (data-race / lock-order) soak. --error-exitcode=99 so a
+    # detected race FAILS the job; suppressions apply here too.
+    VG=(valgrind --tool=helgrind --error-exitcode=99
+        --log-file="$WORK/logs/valgrind.%p")
+    [ -f "$SUPP" ] && VG+=(--suppressions="$SUPP")
+    RUN=("${VG[@]}" "${RUN[@]}")
+elif [ "${USE_VALGRIND:-0}" = "1" ]; then
     VG=(valgrind --error-exitcode=99 --leak-check=full
         --errors-for-leak-kinds=definite
         --log-file="$WORK/logs/valgrind.%p")
-    SUPP="$(cd "$(dirname "$0")/.." && pwd)/valgrind.suppress"
     [ -f "$SUPP" ] && VG+=(--suppressions="$SUPP")
     RUN=("${VG[@]}" "${RUN[@]}")
 fi
@@ -203,7 +216,7 @@ for _ in $(seq 1 100); do
     sleep 0.1
 done
 
-echo "soak: ${DURATION}s, concurrency ${CONC}$( [ "${USE_VALGRIND:-0}" = 1 ] && echo ' (valgrind)')"
+echo "soak: ${DURATION}s, concurrency ${CONC}$( [ "${USE_HELGRIND:-0}" = 1 ] && echo ' (helgrind)'; [ "${USE_VALGRIND:-0}" = 1 ] && echo ' (memcheck)')"
 END=$(( $(date +%s) + DURATION ))
 
 # Assertion markers written by background workers.
@@ -235,12 +248,12 @@ storm_worker() {
         # 60%: scanner path with bot UA -> high score -> tarpit or block
         if [ $((RANDOM % 10)) -lt 6 ]; then
             p="${scanner_paths[$((RANDOM % ${#scanner_paths[@]}))]}"
-            code=$(curl -s -o /dev/null -w '%{http_code}' \
+            code=$(curl -s -m 10 -o /dev/null -w '%{http_code}' \
                 -H "User-Agent: $bot_ua" \
                 "http://127.0.0.1:$PORT$p" 2>/dev/null || echo 000)
         else
             # 40%: random missing path -> 404 errrate accumulation
-            code=$(curl -s -o /dev/null -w '%{http_code}' \
+            code=$(curl -s -m 10 -o /dev/null -w '%{http_code}' \
                 "http://127.0.0.1:$PORT/missing_$(( RANDOM % 200 ))" \
                 2>/dev/null || echo 000)
         fi
@@ -263,12 +276,12 @@ storm_worker() {
 block_worker() {
     local bot_ua="Masscan/1.3 (https://github.com/robertdavidgraham/masscan)"
     while [ "$(date +%s)" -lt "$END" ]; do
-        code=$(curl -s -o /dev/null -w '%{http_code}' \
+        code=$(curl -s -m 10 -o /dev/null -w '%{http_code}' \
             -H "User-Agent: $bot_ua" \
             "http://127.0.0.1:$PORT/.git/config" 2>/dev/null || echo 000)
         [ "$code" = "403" ] && : > "$saw_crowdsec_block" 2>/dev/null || true
         # Also probe ok path to get 200 for tarpit assertion above.
-        code2=$(curl -s -o /dev/null -w '%{http_code}' \
+        code2=$(curl -s -m 10 -o /dev/null -w '%{http_code}' \
             "http://127.0.0.1:$PORT/" 2>/dev/null || echo 000)
         [ "$code2" = "200" ] && : > "$saw_tarpit" 2>/dev/null || true
     done
@@ -285,7 +298,18 @@ kill "$REWRITER_PID" 2>/dev/null || true
 wait "$REWRITER_PID" 2>/dev/null || true
 
 # Clean shutdown so per-pool cleanups and tarpit decrements run.
+# worker_shutdown_timeout (in the conf above) bounds graceful drain; this
+# outer guard is a hard backstop -- if the process is still alive well past
+# that (e.g. valgrind teardown wedged), force-kill so the soak can never hang.
 kill -QUIT "$NGINX_PID" 2>/dev/null || true
+for _ in $(seq 1 30); do
+    kill -0 "$NGINX_PID" 2>/dev/null || break
+    sleep 1
+done
+if kill -0 "$NGINX_PID" 2>/dev/null; then
+    echo "WARN: nginx did not exit after SIGQUIT; force-killing"
+    kill -KILL "$NGINX_PID" 2>/dev/null || true
+fi
 wait "$NGINX_PID" 2>/dev/null; rc=$?
 
 # Post-run assertion: check error log for evidence that the module actually

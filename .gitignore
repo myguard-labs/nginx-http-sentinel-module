@@ -13,7 +13,11 @@ t/servroot/
 
 # fuzzing: track hand-written named seed corpus files (.txt/.bin) and crash
 # repros; ignore built binaries and hash-named units libFuzzer generates.
-fuzz/bin/
+# Binaries now build into the top-level fuzz/ dir (directory normalisation).
+fuzz/fuzz_feed
+fuzz/fuzz_botua
+fuzz/fuzz_ja4h_canon
+fuzz/corpus-min/
 fuzz/crash-*
 fuzz/corpus/*/*
 !fuzz/corpus/*/*.txt
