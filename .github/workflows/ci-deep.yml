@@ -217,10 +217,16 @@ jobs:
           fi
       - name: Generate nginx build headers (for clang-tidy)
         run: |
-          # /usr/share/nginx/src is root-owned; configure a writable copy so
-          # ngx_auto_headers.h actually gets generated (a silent failure here
-          # previously left clang-tidy without generated headers).
-          cp -a /usr/share/nginx/src "$RUNNER_TEMP/nginx-src"
+          # Analyze against the same latest-mainline nginx the build jobs use.
+          # nginx-dev's 1.24 tree is too old: the module calls
+          # ngx_http_parse_cookie_lines(), added in nginx 1.29.6.
+          set -euo pipefail
+          ver=$(curl -fsSL https://nginx.org/en/download.html \
+            | grep -oP 'nginx-\K[0-9]+\.[0-9]+\.[0-9]+(?=\.tar\.gz)' | sort -V | tail -1)
+          wget -q -O "$RUNNER_TEMP/nginx.tar.gz" \
+            "https://nginx.org/download/nginx-${ver}.tar.gz"
+          tar -xzf "$RUNNER_TEMP/nginx.tar.gz" -C "$RUNNER_TEMP"
+          mv "$RUNNER_TEMP/nginx-${ver}" "$RUNNER_TEMP/nginx-src"
           cd "$RUNNER_TEMP/nginx-src"
           CC=gcc ./configure --with-compat \
             --add-dynamic-module="$GITHUB_WORKSPACE" > /dev/null
