@@ -217,9 +217,13 @@ jobs:
           fi
       - name: Generate nginx build headers (for clang-tidy)
         run: |
-          cd /usr/share/nginx/src
+          # /usr/share/nginx/src is root-owned; configure a writable copy so
+          # ngx_auto_headers.h actually gets generated (a silent failure here
+          # previously left clang-tidy without generated headers).
+          cp -a /usr/share/nginx/src "$RUNNER_TEMP/nginx-src"
+          cd "$RUNNER_TEMP/nginx-src"
           CC=gcc ./configure --with-compat \
-            --add-dynamic-module="$GITHUB_WORKSPACE" > /dev/null 2>&1 || true
+            --add-dynamic-module="$GITHUB_WORKSPACE" > /dev/null
       - name: flawfinder (gate on >=4)
         run: |
           set -euo pipefail
@@ -233,7 +237,7 @@ jobs:
       - name: clang-tidy (cert-*, security.*)
         run: |
           set -euo pipefail
-          NGINX_OBJS=/usr/share/nginx/src/objs
+          NGINX_OBJS="$RUNNER_TEMP/nginx-src/objs"
           NGINX_INCLUDES=$(dpkg -L nginx-dev 2>/dev/null \
             | grep 'ngx_config.h' | head -1 | xargs dirname \
             || echo /usr/include/nginx)
