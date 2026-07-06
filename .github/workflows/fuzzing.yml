@@ -1,17 +1,8 @@
-name: CI Fast
+name: Fuzzing
 
-# Fast dynamic analysis on every PR/push — kept short so PR feedback stays
-# quick. build-test.yml already does the full build + ASan/UBSan runtime/.t
-# matrix; THIS file adds only the two cheap dynamic gates:
-#   fuzz-regression : 120s per target on the sentinel input parsers
-#                     (feed / botua / ja4h_canon)
-#   memcheck-lite   : 60s valgrind memcheck soak (helgrind is deep-only)
-# Long discovery (hours fuzz, full memcheck+helgrind soak, scanners) lives in
-# ci-deep.yml (monthly cron + workflow_dispatch).
-#
-# The fuzz targets stub nginx types but fuzz/build.sh guards on an nginx source
-# tree under .build/, so we populate it via tools/ci-build.sh (module mode)
-# BEFORE building the fuzz binaries.
+# Fast fuzz regression gate on every PR/push — 120s per target on the sentinel
+# input parsers (feed / botua / ja4h_canon). Long fuzz discovery (hours per
+# target) lives in ci-deep.yml (monthly cron + workflow_dispatch).
 #
 # Action pins (keep in sync with build-test.yml header):
 # actions/checkout@v5        -> 93cb6efe18208431cddfb8368fd83d5badbf9bfd
@@ -29,7 +20,7 @@ on:
   workflow_dispatch: {}
 
 concurrency:
-  group: ci-fast-${{ github.workflow }}-${{ github.ref }}
+  group: fuzzing-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -86,28 +77,3 @@ jobs:
           name: fuzz-fast-crashes
           path: ${{ github.workspace }}/fuzz/crash-*
           retention-days: 14
-
-  memcheck-lite:
-    name: Memcheck lite (60s soak)
-    runs-on: [self-hosted, builder02, lxc]
-    timeout-minutes: 45
-    steps:
-      - name: Checkout module
-        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
-
-      - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            build-essential clang curl libpcre2-dev libssl-dev zlib1g-dev \
-            libhiredis-dev valgrind
-
-      - name: Build debug nginx + module
-        run: bash tools/ci-build.sh nginx "$NGINX_VERSION" debug
-
-      - name: Memcheck soak (60s @ 4 conc, WITH suppressions)
-        env:
-          USE_VALGRIND: "1"
-        run: |
-          bash tools/soak.sh \
-            "$GITHUB_WORKSPACE/.build/nginx-${NGINX_VERSION}/objs/nginx" 60 4
