@@ -1,7 +1,9 @@
 # nginx-http-sentinel-module
 
 [![Build & Test](https://github.com/myguard-labs/nginx-http-sentinel-module/actions/workflows/build-test.yml/badge.svg)](https://github.com/myguard-labs/nginx-http-sentinel-module/actions/workflows/build-test.yml)
-[![CI Fast](https://github.com/myguard-labs/nginx-http-sentinel-module/actions/workflows/ci-fast.yml/badge.svg)](https://github.com/myguard-labs/nginx-http-sentinel-module/actions/workflows/ci-fast.yml)
+[![Security scanners](https://github.com/myguard-labs/nginx-http-sentinel-module/actions/workflows/security-scanners.yml/badge.svg)](https://github.com/myguard-labs/nginx-http-sentinel-module/actions/workflows/security-scanners.yml)
+[![Fuzzing](https://github.com/myguard-labs/nginx-http-sentinel-module/actions/workflows/fuzzing.yml/badge.svg)](https://github.com/myguard-labs/nginx-http-sentinel-module/actions/workflows/fuzzing.yml)
+[![Valgrind](https://github.com/myguard-labs/nginx-http-sentinel-module/actions/workflows/valgrind.yml/badge.svg)](https://github.com/myguard-labs/nginx-http-sentinel-module/actions/workflows/valgrind.yml)
 [![CI Deep](https://github.com/myguard-labs/nginx-http-sentinel-module/actions/workflows/ci-deep.yml/badge.svg)](https://github.com/myguard-labs/nginx-http-sentinel-module/actions/workflows/ci-deep.yml)
 
 A single nginx PREACCESS module that scores every client and acts on the verdict —
@@ -727,7 +729,9 @@ Example PromQL: `rate(sentinel_verdict_total{v="block"}[5m])`
 ## Development
 
 Feature branch off `master` → PR to `master` → remote CI green → squash-merge.
-Build/test standalone: `bash tools/ci-build.sh`. Valgrind + fuzz run monthly (remote cron) and weekly (local cron).
+Build/test standalone: `bash tools/ci-build.sh`. Every PR/push runs build-test,
+security-scanners, fuzzing (120s/target regression) and valgrind (memcheck lite);
+the exhaustive fuzz + memcheck/helgrind soak (ci-deep) runs monthly (remote cron) and weekly (local cron).
 
 ## License
 

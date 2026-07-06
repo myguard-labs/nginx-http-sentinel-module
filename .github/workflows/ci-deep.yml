@@ -1,8 +1,10 @@
 name: CI Deep
 
 # Exhaustive dynamic analysis — monthly cron + on-demand only, NEVER on PR.
-# Consolidates the old fuzzing.yml + valgrind.yml + helgrind.yml +
-# security-scanners.yml into one workflow. (No codeql.yml existed; CodeQL / the
+# The PR-time gates live in standalone workflows: fuzzing.yml (fast fuzz
+# regression), valgrind.yml (memcheck lite soak) and security-scanners.yml
+# (scanners) — this file stays the exhaustive monthly+dispatch run.
+# (No codeql.yml existed; CodeQL / the
 # GitHub Security tab is GitHub-Advanced-Security only and does nothing on a
 # private repo, so the scanners GATE on findings but upload no SARIF.)
 #
@@ -203,13 +205,31 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            flawfinder clang-tidy python3 python3-pip nginx-dev
-          pip3 install --quiet semgrep
+            flawfinder clang-tidy python3 python3-pip pipx nginx-dev
+          # semgrep: isolate via pipx (PEP 668 blocks a bare pip3 install into
+          # the system Python on the Ubuntu 24.04 self-hosted runner).
+          if command -v pipx >/dev/null; then
+            pipx install --quiet semgrep
+            echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          else
+            pip3 install --quiet --user --break-system-packages semgrep
+            echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          fi
       - name: Generate nginx build headers (for clang-tidy)
         run: |
-          cd /usr/share/nginx/src
+          # Analyze against the same latest-mainline nginx the build jobs use.
+          # nginx-dev's 1.24 tree is too old: the module calls
+          # ngx_http_parse_cookie_lines(), added in nginx 1.29.6.
+          set -euo pipefail
+          ver=$(curl -fsSL https://nginx.org/en/download.html \
+            | grep -oP 'nginx-\K[0-9]+\.[0-9]+\.[0-9]+(?=\.tar\.gz)' | sort -V | tail -1)
+          wget -q -O "$RUNNER_TEMP/nginx.tar.gz" \
+            "https://nginx.org/download/nginx-${ver}.tar.gz"
+          tar -xzf "$RUNNER_TEMP/nginx.tar.gz" -C "$RUNNER_TEMP"
+          mv "$RUNNER_TEMP/nginx-${ver}" "$RUNNER_TEMP/nginx-src"
+          cd "$RUNNER_TEMP/nginx-src"
           CC=gcc ./configure --with-compat \
-            --add-dynamic-module="$GITHUB_WORKSPACE" > /dev/null 2>&1 || true
+            --add-dynamic-module="$GITHUB_WORKSPACE" > /dev/null
       - name: flawfinder (gate on >=4)
         run: |
           set -euo pipefail
@@ -223,11 +243,10 @@ jobs:
       - name: clang-tidy (cert-*, security.*)
         run: |
           set -euo pipefail
-          NGINX_OBJS=/usr/share/nginx/src/objs
-          NGINX_INCLUDES=$(dpkg -L nginx-dev 2>/dev/null \
-            | grep 'ngx_config.h' | head -1 | xargs dirname \
-            || echo /usr/include/nginx)
-          INCLUDES="-I$NGINX_INCLUDES -I$NGINX_OBJS -I$GITHUB_WORKSPACE/src -I/usr/include"
+          N="$RUNNER_TEMP/nginx-src"
+          INCLUDES="-I$N/src/core -I$N/src/event -I$N/src/event/modules \
+            -I$N/src/os/unix -I$N/objs -I$N/src/http -I$N/src/http/modules \
+            -I$N/src/http/v2 -I$GITHUB_WORKSPACE/src -I/usr/include"
           status=0
           for src in "$GITHUB_WORKSPACE"/src/*.c; do
             echo "--- clang-tidy: $(basename "$src") ---"
