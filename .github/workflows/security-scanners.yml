@@ -69,11 +69,10 @@ jobs:
       - name: clang-tidy (cert-*, security.*)
         run: |
           set -euo pipefail
-          NGINX_OBJS="$RUNNER_TEMP/nginx-src/objs"
-          NGINX_INCLUDES=$(dpkg -L nginx-dev 2>/dev/null \
-            | grep 'ngx_config.h' | head -1 | xargs dirname \
-            || echo /usr/include/nginx)
-          INCLUDES="-I$NGINX_INCLUDES -I$NGINX_OBJS -I$GITHUB_WORKSPACE/src -I/usr/include"
+          N="$RUNNER_TEMP/nginx-src"
+          INCLUDES="-I$N/src/core -I$N/src/event -I$N/src/event/modules \
+            -I$N/src/os/unix -I$N/objs -I$N/src/http -I$N/src/http/modules \
+            -I$N/src/http/v2 -I$GITHUB_WORKSPACE/src -I/usr/include"
           status=0
           for src in "$GITHUB_WORKSPACE"/src/*.c; do
             echo "--- clang-tidy: $(basename "$src") ---"
