@@ -21,3 +21,10 @@
    fun:ngx_alloc
    fun:ngx_event_process_init
 }
+
+{
+   helgrind-ngx-shmtx-process-shared-semaphore
+   Helgrind:Misc
+   fun:sem_wait_WRK
+   fun:ngx_shmtx_lock
+}
