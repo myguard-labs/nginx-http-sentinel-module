@@ -205,8 +205,16 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            flawfinder clang-tidy python3 python3-pip nginx-dev
-          pip3 install --quiet semgrep
+            flawfinder clang-tidy python3 python3-pip pipx nginx-dev
+          # semgrep: isolate via pipx (PEP 668 blocks a bare pip3 install into
+          # the system Python on the Ubuntu 24.04 self-hosted runner).
+          if command -v pipx >/dev/null; then
+            pipx install --quiet semgrep
+            echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          else
+            pip3 install --quiet --user --break-system-packages semgrep
+            echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          fi
       - name: Generate nginx build headers (for clang-tidy)
         run: |
           cd /usr/share/nginx/src
