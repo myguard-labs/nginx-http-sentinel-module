@@ -1,0 +1,103 @@
+name: CodeQL
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  NGINX_VERSION: "1.31.1"
+
+on:
+  # dev intentionally excluded: dev uses LOCAL CI only. Remote CodeQL runs
+  # only on master (promotion) + manual dispatch.
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  schedule:
+    # Monthly, day 6 @ 04:47 UTC (staggered per repo like ci-deep).
+    - cron: "47 4 6 * *"
+  workflow_dispatch: {}
+
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    name: Analyze C
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential curl libpcre2-dev libssl-dev zlib1g-dev
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4
+        with:
+          languages: c-cpp
+          queries: security-extended
+          config: |
+            paths:
+              - src/
+            paths-ignore:
+              - .build/**
+
+      - name: Cache source tarball
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: .build/nginx-${{ env.NGINX_VERSION }}.tar.gz
+          key: src-nginx-${{ env.NGINX_VERSION }}
+
+      - name: Build traced source
+        run: bash tools/ci-build.sh nginx "$NGINX_VERSION" module
+
+      # This is a PRIVATE repo without GitHub Advanced Security. The
+      # codeql-action always contacts the code-scanning / workflow-runs API
+      # (for SARIF upload and its own status report), which returns 403
+      # "Resource not accessible by integration" and fails the step even with
+      # upload: never. The analysis itself is clean and the SARIF IS written to
+      # disk before that 403, so we tolerate the action's failure here
+      # (continue-on-error) and gate on the SARIF in the next step instead.
+      # To restore the Security-tab dashboard, enable GHAS/code scanning in
+      # repo settings, drop continue-on-error, and set upload: always.
+      - name: Analyze
+        uses: github/codeql-action/analyze@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4
+        continue-on-error: true
+        with:
+          category: /language:c-cpp
+          upload: never
+          output: sarif-results
+          upload-database: false
+
+      - name: Fail on CodeQL findings
+        run: |
+          # The upload is skipped (private repo, no GHAS) and the analyze step
+          # is allowed to fail on its API 403, so this is the real gate: fail
+          # if the exported SARIF is missing (analysis did not run) or contains
+          # any result.
+          shopt -s nullglob
+          if [ -z "$(echo sarif-results/*.sarif)" ]; then
+            echo "::error::no SARIF produced — CodeQL analysis did not complete"
+            exit 1
+          fi
+          total=0
+          for f in sarif-results/*.sarif; do
+            n=$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(sum(len(r.get("results",[])) for r in d.get("runs",[])))' "$f")
+            echo "  $f: $n result(s)"
+            total=$((total + n))
+          done
+          echo "CodeQL total findings: $total"
+          if [ "$total" -gt 0 ]; then
+            echo "::error::CodeQL reported $total finding(s) — see logs above"
+            exit 1
+          fi

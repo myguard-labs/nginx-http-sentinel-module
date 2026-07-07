@@ -5,6 +5,7 @@
 [![Fuzzing](https://github.com/myguard-labs/nginx-http-sentinel-module/actions/workflows/fuzzing.yml/badge.svg)](https://github.com/myguard-labs/nginx-http-sentinel-module/actions/workflows/fuzzing.yml)
 [![Valgrind](https://github.com/myguard-labs/nginx-http-sentinel-module/actions/workflows/valgrind.yml/badge.svg)](https://github.com/myguard-labs/nginx-http-sentinel-module/actions/workflows/valgrind.yml)
 [![CI Deep](https://github.com/myguard-labs/nginx-http-sentinel-module/actions/workflows/ci-deep.yml/badge.svg)](https://github.com/myguard-labs/nginx-http-sentinel-module/actions/workflows/ci-deep.yml)
+[![CodeQL](https://github.com/myguard-labs/nginx-http-sentinel-module/actions/workflows/codeql.yml/badge.svg)](https://github.com/myguard-labs/nginx-http-sentinel-module/actions/workflows/codeql.yml)
 
 A single nginx PREACCESS module that scores every client and acts on the verdict —
 tarpit bots, block scanners, PoW-challenge grey-area requests, feed decisions back
