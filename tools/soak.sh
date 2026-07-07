@@ -197,12 +197,14 @@ if [ "${USE_HELGRIND:-0}" = "1" ]; then
     # Thread-error (data-race / lock-order) soak. --error-exitcode=99 so a
     # detected race FAILS the job; suppressions apply here too.
     VG=(valgrind --tool=helgrind --error-exitcode=99
+        --gen-suppressions=all
         --log-file="$WORK/logs/valgrind.%p")
     [ -f "$SUPP" ] && VG+=(--suppressions="$SUPP")
     RUN=("${VG[@]}" "${RUN[@]}")
 elif [ "${USE_VALGRIND:-0}" = "1" ]; then
     VG=(valgrind --error-exitcode=99 --leak-check=full
         --errors-for-leak-kinds=definite
+        --gen-suppressions=all
         --log-file="$WORK/logs/valgrind.%p")
     [ -f "$SUPP" ] && VG+=(--suppressions="$SUPP")
     RUN=("${VG[@]}" "${RUN[@]}")
@@ -332,6 +334,15 @@ if ls "$WORK"/logs/valgrind.* >/dev/null 2>&1; then
             "$WORK"/logs/valgrind.* 2>/dev/null; then
         echo "FAIL: valgrind errors:"
         grep -E 'ERROR SUMMARY|definitely lost' "$WORK"/logs/valgrind.*
+        # Dump every log holding errors in full: the WORK dir is wiped on
+        # exit, so this is the only place the stacks (and the exact
+        # suppression blocks from --gen-suppressions=all) survive, e.g.
+        # in a CI job log.
+        for _vglog in "$WORK"/logs/valgrind.*; do
+            grep -qE 'ERROR SUMMARY: [1-9]' "$_vglog" || continue
+            echo "---- $_vglog ----"
+            cat "$_vglog"
+        done
         problems=1
     fi
 fi
