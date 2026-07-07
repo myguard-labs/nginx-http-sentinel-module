@@ -22,9 +22,17 @@
    fun:ngx_event_process_init
 }
 
+# ngx_shmtx is a process-shared POSIX semaphore in shm; the matching
+# sem_post comes from ANOTHER worker process, which helgrind's
+# single-process view cannot see ("Bug in libpthread: sem_wait succeeded
+# on semaphore without prior sem_post"). The first frame is sem_wait
+# inside valgrind's vgpreload shim: it symbolizes as sem_wait_WRK where
+# the shim has symbols (Debian) but only as an obj: frame where it is
+# stripped (Ubuntu CI runners) — so match with a frame wildcard and pin
+# on ngx_shmtx_lock instead.
 {
    helgrind-ngx-shmtx-process-shared-semaphore
    Helgrind:Misc
-   fun:sem_wait_WRK
+   ...
    fun:ngx_shmtx_lock
 }
